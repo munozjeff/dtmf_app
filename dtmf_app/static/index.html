@@ -243,6 +243,89 @@
     </div>
 
   </section>
+
+  <!-- ══ MONITOR EN TIEMPO REAL ══ -->
+  <section class="monitor-section" id="monitor-section">
+    <div class="monitor-header">
+      <div class="monitor-title-row">
+        <div class="monitor-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+            <path d="M12 2a3 3 0 0 1 3 3v7a3 3 0 0 1-6 0V5a3 3 0 0 1 3-3z"/>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+            <line x1="12" y1="19" x2="12" y2="23"/>
+            <line x1="8"  y1="23" x2="16" y2="23"/>
+          </svg>
+        </div>
+        <div>
+          <h2 class="monitor-title">Monitor en Tiempo Real</h2>
+          <p class="monitor-sub">Detecta tonos DTMF desde tu micrófono al instante</p>
+        </div>
+      </div>
+      <button class="btn btn-monitor" id="monitor-btn">
+        <span class="monitor-btn-icon">▶</span>
+        <span class="monitor-btn-label">Iniciar monitor</span>
+      </button>
+    </div>
+
+    <!-- Visualizador principal -->
+    <div class="monitor-body">
+
+      <!-- Dígito en tiempo real (grande) -->
+      <div class="rt-digit-display">
+        <div class="rt-digit-bg" id="rt-digit-bg">
+          <div class="rt-digit-value" id="rt-digit-value">—</div>
+          <div class="rt-digit-label">Dígito detectado</div>
+        </div>
+        <div class="rt-energy-bar-wrap">
+          <div class="rt-energy-label">Nivel de señal</div>
+          <div class="rt-energy-track">
+            <div class="rt-energy-fill" id="rt-energy-fill"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Secuencia acumulada -->
+      <div class="rt-sequence-panel">
+        <div class="rt-seq-header">
+          <span class="rt-seq-label">Secuencia capturada</span>
+          <button class="btn btn-ghost btn-xs" id="rt-clear-btn">Limpiar</button>
+        </div>
+        <div class="rt-seq-digits" id="rt-seq-digits"></div>
+      </div>
+
+      <!-- Grid DTMF iluminado -->
+      <div class="rt-grid-wrap">
+        <div class="rt-grid-label">Teclado DTMF</div>
+        <div class="rt-dtmf-grid" id="rt-dtmf-grid">
+          <div class="rt-key" id="rtk-1"  data-digit="1">1</div>
+          <div class="rt-key" id="rtk-2"  data-digit="2">2</div>
+          <div class="rt-key" id="rtk-3"  data-digit="3">3</div>
+          <div class="rt-key" id="rtk-A"  data-digit="A">A</div>
+          <div class="rt-key" id="rtk-4"  data-digit="4">4</div>
+          <div class="rt-key" id="rtk-5"  data-digit="5">5</div>
+          <div class="rt-key" id="rtk-6"  data-digit="6">6</div>
+          <div class="rt-key" id="rtk-B"  data-digit="B">B</div>
+          <div class="rt-key" id="rtk-7"  data-digit="7">7</div>
+          <div class="rt-key" id="rtk-8"  data-digit="8">8</div>
+          <div class="rt-key" id="rtk-9"  data-digit="9">9</div>
+          <div class="rt-key" id="rtk-C"  data-digit="C">C</div>
+          <div class="rt-key" id="rtk-star" data-digit="*">*</div>
+          <div class="rt-key" id="rtk-0"  data-digit="0">0</div>
+          <div class="rt-key" id="rtk-hash" data-digit="#">#</div>
+          <div class="rt-key" id="rtk-D"  data-digit="D">D</div>
+        </div>
+      </div>
+
+    </div><!-- /monitor-body -->
+
+    <!-- Status bar -->
+    <div class="monitor-status-bar">
+      <span class="status-dot-rt" id="status-dot-rt"></span>
+      <span class="status-text-rt" id="status-text-rt">Inactivo — presiona "Iniciar monitor" para comenzar</span>
+    </div>
+
+  </section>
+
 </main>
 
 <!-- ── Footer ── -->
@@ -250,6 +333,7 @@
   Pipeline: ffmpeg → Filtro paso de banda (300–3400 Hz) → Noise Reduce → Amplificación → Goertzel DTMF
 </footer>
 
+<script src="https://cdn.socket.io/4.8.1/socket.io.min.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

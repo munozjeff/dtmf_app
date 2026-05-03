@@ -28,6 +28,7 @@ import matplotlib.patches as mpatches
 from scipy.signal import butter, sosfilt, resample_poly
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
+from flask_socketio import SocketIO, emit
 
 # ──────────────────────────────────────────────────────────────
 # Configuracion de ffmpeg
@@ -105,8 +106,9 @@ ALLOWED_EXTENSIONS = {
 }
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
-CORS(app)
+CORS(app, resources={r"/*": {"origins": "*"}})
 app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024   # 100 MB max
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
 
 # ══════════════════════════════════════════════
@@ -454,9 +456,114 @@ def health():
     return jsonify({"status": "ok", "ffmpeg": FFMPEG_EXE or "not found"})
 
 
+# ══════════════════════════════════════════════
+#  WEBSOCKET — MONITOR EN TIEMPO REAL
+# ══════════════════════════════════════════════
+
+# Buffer deslizante por sesion (sid -> list of float32)
+_rt_buffers = {}
+_rt_sr       = {}   # sample rate del cliente por sesion
+
+# Filtro pasa-banda reutilizable (se construye una vez por sr)
+_bp_cache = {}
+
+def _get_bandpass(sr: int):
+    if sr not in _bp_cache:
+        nyq = sr / 2.0
+        sos = butter(4, [300 / nyq, 3400 / nyq], btype="band", output="sos")
+        _bp_cache[sr] = sos
+    return _bp_cache[sr]
+
+
+@socketio.on("connect")
+def on_connect():
+    sid = request.sid
+    _rt_buffers[sid] = []
+    _rt_sr[sid]      = 8000
+    emit("connected", {"sid": sid})
+
+
+@socketio.on("disconnect")
+def on_disconnect():
+    sid = request.sid
+    _rt_buffers.pop(sid, None)
+    _rt_sr.pop(sid, None)
+
+
+@socketio.on("rt_config")
+def on_rt_config(data):
+    """Cliente informa su sample rate."""
+    sid = request.sid
+    _rt_sr[sid] = int(data.get("sampleRate", 44100))
+
+
+@socketio.on("audio_chunk")
+def on_audio_chunk(data):
+    """
+    Recibe un chunk de PCM Float32 del navegador (base64 o lista),
+    lo acumula en un buffer deslizante de 80 ms,
+    aplica Goertzel y emite el digito detectado (o None).
+    """
+    sid       = request.sid
+    client_sr = _rt_sr.get(sid, 44100)
+
+    # Decodificar: el cliente envia JSON con {pcm: [f32, ...], sr: int}
+    pcm_list  = data.get("pcm", [])
+    if not pcm_list:
+        return
+
+    client_sr = int(data.get("sr", client_sr))
+    _rt_sr[sid] = client_sr
+
+    # Convertir a numpy float32
+    chunk = np.array(pcm_list, dtype=np.float32)
+
+    # Resamplear a 8 kHz si es necesario
+    if client_sr != TARGET_SR:
+        g     = gcd(TARGET_SR, client_sr)
+        chunk = resample_poly(chunk, TARGET_SR // g, client_sr // g).astype(np.float32)
+
+    # Acumular en buffer
+    buf = _rt_buffers.setdefault(sid, [])
+    buf.extend(chunk.tolist())
+
+    # Ventana de analisis: 80 ms = 640 muestras a 8kHz
+    WINDOW = int(TARGET_SR * 0.08)   # 640
+    HOP    = int(TARGET_SR * 0.02)   # 160 (20 ms hop)
+
+    if len(buf) < WINDOW:
+        return   # todavia no hay suficientes muestras
+
+    # Tomar la ventana mas reciente
+    frame_np = np.array(buf[-WINDOW:], dtype=np.float32)
+
+    # Filtro pasa-banda
+    sos        = _get_bandpass(TARGET_SR)
+    frame_filt = sosfilt(sos, frame_np).astype(np.float32)
+
+    energy = float(np.mean(frame_filt ** 2))
+    if energy < ENERGY_THRESHOLD:
+        emit("rt_digit", {"digit": None, "energy": 0.0})
+        # Limpiar buffer acumulado (silencio)
+        _rt_buffers[sid] = []
+        return
+
+    digit = detect_dtmf_frame(frame_filt, TARGET_SR, energy)
+
+    # Mantener buffer deslizante: descartar muestras antiguas
+    if len(buf) > WINDOW * 4:
+        _rt_buffers[sid] = buf[-WINDOW:]
+
+    emit("rt_digit", {
+        "digit" : digit,
+        "energy": round(float(energy), 8),
+    })
+
+
 if __name__ == "__main__":
     print("=" * 55)
-    print("  DTMF Analyzer - Servidor Web")
+    print("  DTMF Analyzer - Servidor Web  (WebSocket activo)")
     print("  Abre: http://localhost:5050")
     print("=" * 55)
-    app.run(host="0.0.0.0", port=5050, debug=False)
+    socketio.run(app, host="0.0.0.0", port=5050, debug=False,
+                 allow_unsafe_werkzeug=True)

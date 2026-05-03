@@ -351,3 +351,209 @@ retryBtn.addEventListener("click", () => {
 newBtn.addEventListener("click", () => {
   resetAll();
 });
+
+// ══════════════════════════════════════════════
+//  MONITOR EN TIEMPO REAL
+// ══════════════════════════════════════════════
+(function initMonitor() {
+
+  // DOM refs
+  const monitorBtn    = document.getElementById("monitor-btn");
+  const monitorBtnLbl = monitorBtn.querySelector(".monitor-btn-label");
+  const monitorBtnIco = monitorBtn.querySelector(".monitor-btn-icon");
+  const statusDot     = document.getElementById("status-dot-rt");
+  const statusText    = document.getElementById("status-text-rt");
+  const rtDigitBg     = document.getElementById("rt-digit-bg");
+  const rtDigitVal    = document.getElementById("rt-digit-value");
+  const rtEnergyFill  = document.getElementById("rt-energy-fill");
+  const rtSeqDigits   = document.getElementById("rt-seq-digits");
+  const rtClearBtn    = document.getElementById("rt-clear-btn");
+
+  let socket          = null;
+  let audioCtx        = null;
+  let workletNode     = null;
+  let micStream       = null;
+  let isListening     = false;
+  let lastDigit       = null;
+  let lastDigitTimer  = null;
+  let rtSequence      = [];
+
+  // Colores por dígito (mismo mapa que el resto de la app)
+  function digitColor(d) { return DIGIT_COLORS[d] || "#6366f1"; }
+
+  // ── Actualizar UI con el dígito recibido ──────────────────────
+  function onDigit(digit, energy) {
+    // Barra de energía (log scale para mejor visual)
+    const logE = energy > 0 ? Math.min(1, Math.log10(energy / 1e-7) / 5) : 0;
+    rtEnergyFill.style.width = `${Math.max(0, Math.min(100, logE * 100)).toFixed(1)}%`;
+
+    if (!digit) {
+      // Sin tono activo
+      if (lastDigit) {
+        rtDigitBg.classList.remove("active");
+        // Apagar teclado después de un breve retraso
+        clearTimeout(lastDigitTimer);
+        lastDigitTimer = setTimeout(() => {
+          unlightAll();
+          if (rtDigitVal.textContent !== "—") rtDigitVal.textContent = "—";
+          lastDigit = null;
+        }, 300);
+      }
+      return;
+    }
+
+    // Nuevo dígito detectado
+    clearTimeout(lastDigitTimer);
+
+    // Actualizar display grande
+    if (digit !== lastDigit) {
+      rtDigitVal.textContent = digit;
+      rtDigitBg.classList.remove("active");
+      // Re-trigger animation
+      void rtDigitBg.offsetWidth;
+      rtDigitBg.classList.add("active");
+      rtDigitBg.style.borderColor = digitColor(digit);
+      rtDigitBg.style.boxShadow   = `0 0 28px ${digitColor(digit)}55`;
+
+      // Iluminar tecla del grid
+      unlightAll();
+      const keyId = `rtk-${digit === "*" ? "star" : digit === "#" ? "hash" : digit}`;
+      const keyEl = document.getElementById(keyId);
+      if (keyEl) {
+        keyEl.classList.add("lit");
+        keyEl.style.borderColor = digitColor(digit);
+        keyEl.style.background  = `${digitColor(digit)}33`;
+        keyEl.style.boxShadow   = `0 0 16px ${digitColor(digit)}66`;
+      }
+
+      // Agregar a la secuencia si no es repetición
+      if (rtSequence.length === 0 || rtSequence[rtSequence.length - 1] !== digit) {
+        rtSequence.push(digit);
+        addSeqDigit(digit);
+      }
+
+      lastDigit = digit;
+    }
+  }
+
+  function unlightAll() {
+    document.querySelectorAll(".rt-key.lit").forEach(k => {
+      k.classList.remove("lit");
+      k.style.borderColor = "";
+      k.style.background  = "";
+      k.style.boxShadow   = "";
+    });
+  }
+
+  function addSeqDigit(digit) {
+    const span = document.createElement("span");
+    span.className = "rt-seq-digit";
+    span.textContent = digit;
+    const bg = digitColor(digit);
+    span.style.background = bg;
+    span.style.boxShadow  = `0 4px 12px ${bg}66`;
+    rtSeqDigits.appendChild(span);
+    rtSeqDigits.scrollTop = rtSeqDigits.scrollHeight;
+  }
+
+  function setStatus(state, msg) {
+    statusDot.className  = `status-dot-rt ${state}`;
+    statusText.textContent = msg;
+  }
+
+  // ── Iniciar captura ──────────────────────────────────────────
+  async function startMonitor() {
+    try {
+      setStatus("", "Solicitando acceso al micrófono…");
+
+      micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const nativeSR = audioCtx.sampleRate;
+
+      // Registrar el AudioWorklet
+      await audioCtx.audioWorklet.addModule("/static/dtmf_processor.js");
+
+      const micSource = audioCtx.createMediaStreamSource(micStream);
+      workletNode = new AudioWorkletNode(audioCtx, "dtmf-processor", {
+        processorOptions: { chunkSize: Math.floor(nativeSR * 0.04) }  // 40ms chunks
+      });
+
+      // Recibir chunks del worklet → enviar por Socket.IO
+      workletNode.port.onmessage = (ev) => {
+        if (!socket || !socket.connected) return;
+        socket.emit("audio_chunk", { pcm: ev.data.pcm, sr: nativeSR });
+      };
+
+      micSource.connect(workletNode);
+      workletNode.connect(audioCtx.destination);  // necesario para que el worklet corra
+
+      // Conectar Socket.IO
+      socket = io("http://localhost:5050", { transports: ["websocket"] });
+
+      socket.on("connect", () => {
+        socket.emit("rt_config", { sampleRate: nativeSR });
+        isListening = true;
+        setStatus("listening", `Escuchando — ${nativeSR} Hz → 8 kHz (Goertzel activo)`);
+        monitorBtn.classList.add("active");
+        monitorBtnLbl.textContent = "Detener monitor";
+        monitorBtnIco.textContent = "■";
+      });
+
+      socket.on("disconnect", () => {
+        setStatus("", "Desconectado del servidor");
+      });
+
+      socket.on("rt_digit", (data) => {
+        onDigit(data.digit, data.energy);
+      });
+
+      socket.on("connect_error", (err) => {
+        setStatus("error", `Error de conexión: ${err.message}`);
+      });
+
+    } catch (err) {
+      setStatus("error", `Error: ${err.message || err}`);
+      stopMonitor();
+    }
+  }
+
+  // ── Detener captura ──────────────────────────────────────────
+  function stopMonitor() {
+    isListening = false;
+
+    if (workletNode) { workletNode.disconnect(); workletNode = null; }
+    if (audioCtx)    { audioCtx.close(); audioCtx = null; }
+    if (micStream)   { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+    if (socket)      { socket.disconnect(); socket = null; }
+
+    unlightAll();
+    rtDigitBg.classList.remove("active");
+    rtDigitBg.style.borderColor = "";
+    rtDigitBg.style.boxShadow   = "";
+    rtDigitVal.textContent = "—";
+    rtEnergyFill.style.width = "0%";
+    lastDigit = null;
+
+    monitorBtn.classList.remove("active");
+    monitorBtnLbl.textContent = "Iniciar monitor";
+    monitorBtnIco.textContent = "▶";
+    setStatus("", "Inactivo — presiona \"Iniciar monitor\" para comenzar");
+  }
+
+  // ── Toggle ───────────────────────────────────────────────────
+  monitorBtn.addEventListener("click", () => {
+    if (isListening) {
+      stopMonitor();
+    } else {
+      startMonitor();
+    }
+  });
+
+  // Limpiar secuencia
+  rtClearBtn.addEventListener("click", () => {
+    rtSequence = [];
+    rtSeqDigits.innerHTML = "";
+  });
+
+})();
