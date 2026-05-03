@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DTMF Analyzer — Detección de Tonos Telefónicos</title>
+  <meta name="description" content="Carga un audio y detecta los tonos DTMF (dígitos marcados) usando análisis espectral con el algoritmo de Goertzel." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+
+<!-- ── Background particles ── -->
+<canvas id="bg-canvas"></canvas>
+
+<!-- ── Header ── -->
+<header class="header">
+  <div class="header-inner">
+    <div class="logo">
+      <div class="logo-icon">
+        <svg viewBox="0 0 36 36" fill="none">
+          <circle cx="18" cy="18" r="17" stroke="url(#lg1)" stroke-width="2"/>
+          <path d="M8 18 Q18 6 28 18 Q18 30 8 18Z" fill="url(#lg2)" opacity="0.8"/>
+          <circle cx="18" cy="18" r="4" fill="#fff"/>
+          <defs>
+            <linearGradient id="lg1" x1="0" y1="0" x2="36" y2="36">
+              <stop stop-color="#6366f1"/><stop offset="1" stop-color="#06b6d4"/>
+            </linearGradient>
+            <linearGradient id="lg2" x1="0" y1="0" x2="36" y2="36">
+              <stop stop-color="#6366f1"/><stop offset="1" stop-color="#06b6d4"/>
+            </linearGradient>
+          </defs>
+        </svg>
+      </div>
+      <span class="logo-text">DTMF<span class="logo-accent">Analyzer</span></span>
+    </div>
+    <div class="header-badge">
+      <span class="badge-dot"></span>
+      Servidor activo
+    </div>
+  </div>
+</header>
+
+<!-- ── Main ── -->
+<main class="main">
+
+  <!-- Hero -->
+  <section class="hero">
+    <h1 class="hero-title">
+      Detección de Tonos
+      <span class="gradient-text">DTMF Telefónicos</span>
+    </h1>
+    <p class="hero-sub">
+      Carga cualquier grabación de audio y el sistema limpiará el ruido,
+      amplificará la señal y detectará cada número marcado por el usuario
+      usando el algoritmo de <strong>Goertzel</strong>.
+    </p>
+
+    <!-- DTMF reference grid -->
+    <div class="dtmf-ref">
+      <div class="dtmf-cell" style="--c:#6366f1">1<span>697+1209</span></div>
+      <div class="dtmf-cell" style="--c:#8b5cf6">2<span>697+1336</span></div>
+      <div class="dtmf-cell" style="--c:#a855f7">3<span>697+1477</span></div>
+      <div class="dtmf-cell" style="--c:#ec4899">4<span>770+1209</span></div>
+      <div class="dtmf-cell" style="--c:#f43f5e">5<span>770+1336</span></div>
+      <div class="dtmf-cell" style="--c:#ef4444">6<span>770+1477</span></div>
+      <div class="dtmf-cell" style="--c:#f97316">7<span>852+1209</span></div>
+      <div class="dtmf-cell" style="--c:#eab308">8<span>852+1336</span></div>
+      <div class="dtmf-cell" style="--c:#84cc16">9<span>852+1477</span></div>
+      <div class="dtmf-cell" style="--c:#22c55e">*<span>941+1209</span></div>
+      <div class="dtmf-cell" style="--c:#06b6d4">0<span>941+1336</span></div>
+      <div class="dtmf-cell" style="--c:#3b82f6">#<span>941+1477</span></div>
+    </div>
+  </section>
+
+  <!-- Upload card -->
+  <section class="upload-section">
+    <div class="card upload-card" id="drop-zone">
+      <div class="upload-icon" id="upload-icon">
+        <svg viewBox="0 0 64 64" fill="none">
+          <circle cx="32" cy="32" r="30" stroke="url(#ulg)" stroke-width="2" stroke-dasharray="6 3"/>
+          <path d="M32 44V24M24 31l8-8 8 8" stroke="url(#ulg)" stroke-width="2.5"
+                stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M22 46h20" stroke="url(#ulg)" stroke-width="2.5" stroke-linecap="round"/>
+          <defs>
+            <linearGradient id="ulg" x1="0" y1="0" x2="64" y2="64">
+              <stop stop-color="#6366f1"/><stop offset="1" stop-color="#06b6d4"/>
+            </linearGradient>
+          </defs>
+        </svg>
+      </div>
+      <h2 class="upload-title">Arrastra tu archivo de audio aquí</h2>
+      <p class="upload-sub">o haz clic para seleccionarlo</p>
+      <p class="upload-formats">
+        WAV · MP3 · M4A · AAC · OGG · OPUS · FLAC · WMA · MP4 · WEBM · 3GP · AMR
+      </p>
+      <label class="btn btn-primary" for="file-input" id="select-btn">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+          <polyline points="17 8 12 3 7 8"/>
+          <line x1="12" y1="3" x2="12" y2="15"/>
+        </svg>
+        Seleccionar archivo
+      </label>
+      <input type="file" id="file-input" accept="audio/*,video/*,.m4a,.aac,.ogg,.opus,.flac,.wma,.amr,.3gp" hidden />
+
+      <!-- File preview -->
+      <div class="file-preview" id="file-preview" hidden>
+        <div class="file-info">
+          <div class="file-icon">🎵</div>
+          <div>
+            <div class="file-name" id="file-name"></div>
+            <div class="file-size" id="file-size"></div>
+          </div>
+          <button class="btn-remove" id="remove-btn" title="Quitar archivo">✕</button>
+        </div>
+        <button class="btn btn-primary btn-analyze" id="analyze-btn">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+          </svg>
+          Analizar audio
+        </button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Progress -->
+  <section class="progress-section" id="progress-section" hidden>
+    <div class="card progress-card">
+      <div class="progress-header">
+        <div class="spinner"></div>
+        <span class="progress-label" id="progress-label">Procesando audio…</span>
+      </div>
+      <div class="steps" id="steps">
+        <div class="step" id="step-upload">
+          <div class="step-dot"></div>
+          <span>Subiendo archivo</span>
+        </div>
+        <div class="step" id="step-convert">
+          <div class="step-dot"></div>
+          <span>Convirtiendo a WAV 8kHz</span>
+        </div>
+        <div class="step" id="step-noise">
+          <div class="step-dot"></div>
+          <span>Reduciendo ruido de fondo</span>
+        </div>
+        <div class="step" id="step-amplify">
+          <div class="step-dot"></div>
+          <span>Amplificando señal</span>
+        </div>
+        <div class="step" id="step-goertzel">
+          <div class="step-dot"></div>
+          <span>Aplicando algoritmo de Goertzel</span>
+        </div>
+        <div class="step" id="step-chart">
+          <div class="step-dot"></div>
+          <span>Generando espectrograma</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Error -->
+  <section class="error-section" id="error-section" hidden>
+    <div class="card error-card">
+      <div class="error-icon">⚠️</div>
+      <div class="error-msg" id="error-msg"></div>
+      <button class="btn btn-ghost" id="retry-btn">Intentar de nuevo</button>
+    </div>
+  </section>
+
+  <!-- Results -->
+  <section class="results-section" id="results-section" hidden>
+
+    <!-- Summary bar -->
+    <div class="results-summary" id="results-summary">
+      <div class="summary-item">
+        <div class="summary-label">Archivo</div>
+        <div class="summary-val" id="res-filename"></div>
+      </div>
+      <div class="summary-item">
+        <div class="summary-label">Duración</div>
+        <div class="summary-val" id="res-duration"></div>
+      </div>
+      <div class="summary-item">
+        <div class="summary-label">Tonos detectados</div>
+        <div class="summary-val" id="res-count"></div>
+      </div>
+    </div>
+
+    <!-- Sequence display -->
+    <div class="card sequence-card" id="sequence-card">
+      <div class="seq-label">Secuencia marcada</div>
+      <div class="seq-digits" id="seq-digits"></div>
+      <button class="btn btn-ghost copy-btn" id="copy-btn" title="Copiar">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2">
+          <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+        </svg>
+        Copiar
+      </button>
+    </div>
+
+    <!-- Chart -->
+    <div class="card chart-card">
+      <h3 class="card-title">Espectrograma y Forma de Onda</h3>
+      <img id="chart-img" class="chart-img" src="" alt="Espectrograma DTMF" />
+    </div>
+
+    <!-- Tones table -->
+    <div class="card table-card">
+      <h3 class="card-title">Detalle de Tonos</h3>
+      <div class="table-wrap">
+        <table id="tones-table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Dígito</th>
+              <th>Inicio (s)</th>
+              <th>Fin (s)</th>
+              <th>Duración (ms)</th>
+              <th>Frecuencias</th>
+            </tr>
+          </thead>
+          <tbody id="tones-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- New analysis btn -->
+    <div class="action-row">
+      <button class="btn btn-primary" id="new-btn">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2">
+          <polyline points="1 4 1 10 7 10"/>
+          <path d="M3.51 15a9 9 0 1 0 .49-4.79"/>
+        </svg>
+        Nuevo análisis
+      </button>
+    </div>
+
+  </section>
+</main>
+
+<!-- ── Footer ── -->
+<footer class="footer">
+  Pipeline: ffmpeg → Filtro paso de banda (300–3400 Hz) → Noise Reduce → Amplificación → Goertzel DTMF
+</footer>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

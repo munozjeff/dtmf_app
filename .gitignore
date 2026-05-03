@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+ENV/
+
+# Audio and media files (Large files)
+*.wav
+*.m4a
+*.mp3
+*.aac
+*.ogg
+*.opus
+*.flac
+*.wma
+*.mp4
+*.webm
+*.3gp
+*.amr
+*.png
+*.jpg
+*.jpeg
+
+# App specific
+dtmf_app/uploads/
+dtmf_app/static/plots/
+
+# Logs and temp
+*.log
+.tempmediaStorage/
