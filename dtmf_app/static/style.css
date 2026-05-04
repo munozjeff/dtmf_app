@@ -870,3 +870,429 @@ tbody tr:hover td { background: var(--surface-2); }
   background: var(--red);
   box-shadow: 0 0 8px var(--red);
 }
+
+/* ═══════════════════════════════════════════════════
+   HEADER TABS
+   ═══════════════════════════════════════════════════ */
+
+.header-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.header-tab {
+  padding: 6px 16px;
+  border-radius: var(--radius-sm);
+  font-family: var(--font);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-muted);
+  transition: all .2s;
+  user-select: none;
+}
+.header-tab:hover {
+  background: var(--surface-2);
+  color: var(--text);
+  border-color: var(--border);
+}
+.header-tab.active {
+  background: color-mix(in srgb, var(--primary) 15%, var(--surface));
+  color: var(--primary-h);
+  border-color: color-mix(in srgb, var(--primary) 40%, transparent);
+}
+
+/* Small button variant */
+.btn-sm {
+  padding: 6px 14px !important;
+  font-size: 12px !important;
+}
+
+/* ═══════════════════════════════════════════════════
+   IVR AUTOMATOR
+   ═══════════════════════════════════════════════════ */
+
+.ivr-section {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.ivr-grid {
+  display: grid;
+  grid-template-columns: 380px 1fr;
+  gap: 24px;
+  align-items: start;
+}
+@media (max-width: 900px) {
+  .ivr-grid { grid-template-columns: 1fr; }
+}
+
+.ivr-panel-title {
+  font-size: 14px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .8px;
+  color: var(--text-muted);
+  margin-bottom: 20px;
+}
+
+/* Config card */
+.ivr-config-card {
+  padding: 24px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.ivr-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 16px;
+}
+
+.ivr-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  letter-spacing: .4px;
+}
+
+.ivr-input {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 14px;
+  padding: 9px 13px;
+  outline: none;
+  transition: border-color .2s, box-shadow .2s;
+  width: 100%;
+}
+.ivr-input:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--border-glow);
+}
+
+.ivr-select {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 14px;
+  padding: 9px 13px;
+  outline: none;
+  transition: border-color .2s;
+  flex: 1;
+  cursor: pointer;
+}
+.ivr-select:focus { border-color: var(--primary); }
+
+.ivr-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ivr-file-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.ivr-file-name {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-family: var(--mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 180px;
+}
+
+.ivr-badge-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+.ivr-badge {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 20px;
+}
+.ivr-badge-blue {
+  background: color-mix(in srgb, var(--cyan) 15%, transparent);
+  color: var(--cyan);
+  border: 1px solid color-mix(in srgb, var(--cyan) 30%, transparent);
+}
+.ivr-badge-green {
+  background: color-mix(in srgb, var(--green) 15%, transparent);
+  color: var(--green);
+  border: 1px solid color-mix(in srgb, var(--green) 30%, transparent);
+}
+.ivr-badge-red {
+  background: color-mix(in srgb, var(--red) 15%, transparent);
+  color: var(--red);
+  border: 1px solid color-mix(in srgb, var(--red) 30%, transparent);
+}
+.ivr-badge-yellow {
+  background: color-mix(in srgb, var(--yellow) 15%, transparent);
+  color: var(--yellow);
+  border: 1px solid color-mix(in srgb, var(--yellow) 30%, transparent);
+}
+
+/* IVR options list */
+.ivr-options-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.ivr-option-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ivr-option-digit {
+  width: 60px;
+  flex-shrink: 0;
+  text-align: center;
+  font-family: var(--mono);
+  font-size: 16px;
+  font-weight: 700;
+}
+.ivr-option-desc {
+  flex: 1;
+}
+.ivr-option-remove {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 16px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  transition: color .2s, background .2s;
+}
+.ivr-option-remove:hover {
+  color: var(--red);
+  background: rgba(244,63,94,.1);
+}
+.ivr-add-option {
+  align-self: flex-start;
+  margin-top: 4px;
+}
+
+/* Actions row */
+.ivr-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+.ivr-actions .btn { flex: 1; justify-content: center; min-width: 120px; }
+
+/* Right column */
+.ivr-right-col {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+/* Progress card */
+.ivr-progress-card {
+  padding: 22px;
+}
+.ivr-progress-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+.ivr-progress-bar-wrap {
+  height: 8px;
+  background: var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 10px;
+}
+.ivr-progress-bar {
+  height: 100%;
+  background: var(--gradient);
+  border-radius: 4px;
+  transition: width .4s ease;
+}
+.ivr-progress-stats {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.ivr-status-text {
+  font-weight: 600;
+  color: var(--cyan);
+}
+
+/* Current call display */
+.ivr-current-call {
+  margin-top: 14px;
+  padding: 14px 16px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  animation: fade-in .3s ease;
+}
+.ivr-call-number {
+  font-family: var(--mono);
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text);
+}
+.ivr-call-state-badges {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.ivr-state-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 10px;
+  border-radius: 20px;
+  letter-spacing: .5px;
+}
+.ivr-state-badge.connecting, .ivr-state-badge.dialing {
+  background: color-mix(in srgb, var(--yellow) 15%, transparent);
+  color: var(--yellow);
+}
+.ivr-state-badge.active {
+  background: color-mix(in srgb, var(--green) 15%, transparent);
+  color: var(--green);
+}
+.ivr-state-badge.disconnected {
+  background: color-mix(in srgb, var(--red) 15%, transparent);
+  color: var(--red);
+}
+.ivr-state-badge.calling {
+  background: color-mix(in srgb, var(--primary) 15%, transparent);
+  color: var(--primary-h);
+}
+
+/* Queue table */
+.ivr-queue-card { padding: 22px; }
+.ivr-queue-table-wrap { overflow-x: auto; max-height: 280px; overflow-y: auto; }
+.ivr-queue-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.ivr-queue-table th {
+  font-size: 10px;
+  position: sticky;
+  top: 0;
+  background: var(--surface);
+  z-index: 1;
+}
+.ivr-queue-table td { padding: 10px 14px; }
+.ivr-queue-table tr.row-calling td { background: color-mix(in srgb, var(--primary) 8%, transparent); }
+.ivr-queue-table tr.row-done td { opacity: .7; }
+.ivr-queue-table tr.row-error td { background: color-mix(in srgb, var(--red) 6%, transparent); }
+
+.ivr-status-pill {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 20px;
+  letter-spacing: .4px;
+  white-space: nowrap;
+}
+.pill-pending   { background: var(--surface-2); color: var(--text-dim); }
+.pill-calling   { background: color-mix(in srgb,var(--primary)20%,transparent); color: var(--primary-h); }
+.pill-answered  { background: color-mix(in srgb,var(--green)20%,transparent); color: var(--green); }
+.pill-no-answer { background: color-mix(in srgb,var(--yellow)20%,transparent); color: var(--yellow); }
+.pill-error     { background: color-mix(in srgb,var(--red)20%,transparent); color: var(--red); }
+.pill-tone      { background: color-mix(in srgb,var(--cyan)20%,transparent); color: var(--cyan); }
+
+/* Log panel */
+.ivr-log-card { padding: 22px; }
+.ivr-log-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.ivr-log {
+  background: #0a0e14;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  height: 200px;
+  overflow-y: auto;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.7;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ivr-log-entry { display: flex; gap: 8px; align-items: baseline; }
+.ivr-log-time { color: var(--text-dim); flex-shrink: 0; }
+.ivr-log-msg  { color: var(--text-muted); }
+.ivr-log-entry.lvl-success .ivr-log-msg { color: var(--green); }
+.ivr-log-entry.lvl-error   .ivr-log-msg { color: var(--red); }
+.ivr-log-entry.lvl-warn    .ivr-log-msg { color: var(--yellow); }
+.ivr-log-entry.lvl-info    .ivr-log-msg { color: var(--text-muted); }
+
+/* Modal prueba */
+.ivr-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,.7);
+  backdrop-filter: blur(6px);
+  z-index: 500;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: fade-in .2s ease;
+}
+.ivr-modal {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 32px 36px;
+  width: 100%;
+  max-width: 420px;
+  box-shadow: var(--shadow-lg);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.ivr-modal h3 {
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -.3px;
+}
+.ivr-modal p { font-size: 14px; color: var(--text-muted); }
+.ivr-modal-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 4px;
+}
+.ivr-modal-actions .btn { flex: 1; justify-content: center; }

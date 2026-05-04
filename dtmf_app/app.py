@@ -15,8 +15,39 @@ import base64
 import subprocess
 import tempfile
 import traceback
+import threading
+import csv
+import time
+from collections import deque
+from datetime import datetime
 from io import BytesIO
 from math import gcd
+
+# IVR — reproducción de audio
+try:
+    import pygame
+    pygame.mixer.init()
+    _PYGAME_OK = True
+except Exception:
+    _PYGAME_OK = False
+    print("[WARN] pygame no disponible — reproducción de audio desactivada")
+
+# IVR — lectura de Excel
+try:
+    import openpyxl
+    _OPENPYXL_OK = True
+except Exception:
+    _OPENPYXL_OK = False
+    print("[WARN] openpyxl no disponible — carga de Excel desactivada")
+
+# IVR — CallMonitor
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+try:
+    from estado_llamada import CallMonitor
+    _MONITOR_OK = True
+except Exception as _e:
+    _MONITOR_OK = False
+    print(f"[WARN] CallMonitor no disponible: {_e}")
 
 import numpy as np
 import soundfile as sf
@@ -558,6 +589,444 @@ def on_audio_chunk(data):
         "digit" : digit,
         "energy": round(float(energy), 8),
     })
+
+    # Si hay una campaña IVR activa y se detectó un dígito real → notificarla
+    if digit and _ivr_dtmf_callback:
+        try:
+            _ivr_dtmf_callback(digit)
+        except Exception:
+            pass
+
+
+# ══════════════════════════════════════════════
+#  IVR AUTOMATOR — Configuración y estado global
+# ══════════════════════════════════════════════
+
+IVR_RESULTS_CSV = os.path.join(os.path.dirname(__file__), "ivr_results.csv")
+IVR_AUDIO_FOLDER = os.path.join(os.path.dirname(__file__), "ivr_audio")
+os.makedirs(IVR_AUDIO_FOLDER, exist_ok=True)
+
+# Estado global de la campaña (singleton)
+_ivr_campaign: "IVRCampaign | None" = None
+_ivr_lock = threading.Lock()
+
+# Cuando el IVR está ACTIVO, cualquier dígito DTMF detectado por
+# el monitor de micrófono se desvía aquí en lugar de sólo emitirse a la UI
+_ivr_dtmf_callback = None   # callable(digit) | None
+
+
+def _save_call_result(number: str, status: str, digit: str | None, notes: str = ""):
+    """Guarda el resultado de una llamada en el CSV de resultados."""
+    file_exists = os.path.isfile(IVR_RESULTS_CSV)
+    with open(IVR_RESULTS_CSV, "a", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        if not file_exists:
+            writer.writerow(["timestamp", "numero", "estado", "tono_detectado", "notas"])
+        writer.writerow([
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            number, status, digit or "", notes
+        ])
+
+
+def _play_audio(path: str):
+    """Reproduce un archivo de audio en la PC via pygame."""
+    if not _PYGAME_OK or not path or not os.path.isfile(path):
+        return
+    try:
+        pygame.mixer.music.load(path)
+        pygame.mixer.music.play()
+        # Esperar a que termine (máx 60 s)
+        start = time.time()
+        while pygame.mixer.music.get_busy() and (time.time() - start) < 60:
+            time.sleep(0.1)
+    except Exception as exc:
+        print(f"[IVR] Error reproduciendo audio: {exc}")
+
+
+def _emit_ivr(event: str, data: dict):
+    """Emite un evento Socket.IO desde cualquier hilo."""
+    socketio.emit(event, data)
+
+
+class IVRCampaign(threading.Thread):
+    """
+    Hilo que procesa una cola de números telefónicos uno por uno.
+    Para cada número:
+      1. Marca con ADB
+      2. Monitorea el estado via logcat (CallMonitor)
+      3. Si ACTIVE → reproduce audio inicial
+      4. Espera tono DTMF del cliente via monitor de micrófono
+      5. Si detecta dígito válido → reproduce audio de despedida → cuelga
+      6. Si no detecta en timeout → reproduce audio intermedio → repite
+      7. Guarda resultado en CSV
+    """
+
+    def __init__(self, config: dict):
+        super().__init__(daemon=True, name="IVRCampaign")
+        self.config        = config
+        self.queue         = deque(config.get("numbers", []))
+        self.total         = len(self.queue)
+        self.processed     = 0
+        self.device_id     = config.get("device_id")
+        self.delay_s       = float(config.get("delay_seconds", 5))
+        self.audio_initial = config.get("audio_initial")    # ruta absoluta
+        self.audio_middle  = config.get("audio_middle")     # ruta absoluta
+        self.audio_bye     = config.get("audio_bye")        # ruta absoluta
+        self.ivr_options   = config.get("ivr_options", {})  # {"1": "Interesado", ...}
+        self.tone_timeout  = float(config.get("tone_timeout", 10))
+        self.is_test       = config.get("is_test", False)
+
+        self._stop_event   = threading.Event()
+        self._pause_event  = threading.Event()
+        self._pause_event.set()   # no pausado al inicio
+
+        # Para sincronizar detección de tono dentro de handle_active
+        self._digit_event  = threading.Event()
+        self._last_digit   = None
+
+    # ── API pública ──────────────────────────────────────────────
+
+    def stop(self):
+        self._stop_event.set()
+        self._digit_event.set()   # desbloquear espera de tono
+
+    def pause(self):
+        self._pause_event.clear()
+
+    def resume(self):
+        self._pause_event.set()
+
+    @property
+    def is_running(self):
+        return self.is_alive() and not self._stop_event.is_set()
+
+    def on_dtmf(self, digit: str):
+        """Llamado por el handler WebSocket cuando llega un dígito DTMF."""
+        self._last_digit = digit
+        self._digit_event.set()
+
+    # ── Hilo principal ───────────────────────────────────────────
+
+    def run(self):
+        global _ivr_dtmf_callback
+        _ivr_dtmf_callback = self.on_dtmf
+
+        _emit_ivr("ivr_log", {"msg": f"🚀 Campaña iniciada — {self.total} números en cola",
+                               "level": "info"})
+
+        while self.queue and not self._stop_event.is_set():
+            self._pause_event.wait()   # bloqueante si está pausado
+            if self._stop_event.is_set():
+                break
+
+            number = self.queue.popleft()
+            self.processed += 1
+            self._process_number(number)
+
+            if self.queue and not self._stop_event.is_set():
+                _emit_ivr("ivr_log", {"msg": f"⏳ Esperando {self.delay_s}s antes de la próxima llamada",
+                                       "level": "info"})
+                self._interruptible_sleep(self.delay_s)
+
+        _ivr_dtmf_callback = None
+        status = "detenida" if self._stop_event.is_set() else "completada"
+        _emit_ivr("ivr_log", {"msg": f"✅ Campaña {status}. Procesados: {self.processed}/{self.total}",
+                               "level": "success"})
+        _emit_ivr("ivr_campaign_done", {"processed": self.processed, "total": self.total})
+
+    def _process_number(self, number: str):
+        """Ejecuta el flujo completo para un número: marcar → monitorear → reaccionar."""
+        _emit_ivr("ivr_call_update", {
+            "number": number, "status": "CALLING",
+            "processed": self.processed, "total": self.total
+        })
+        _emit_ivr("ivr_log", {"msg": f"📞 Marcando: {number}", "level": "info"})
+
+        result_status = "NO_ANSWER"
+        result_digit  = None
+
+        # — 1. Marcar ——————————————————————————————————————————
+        try:
+            self._adb(["shell", "am", "start", "-a",
+                       "android.intent.action.CALL", "-d", f"tel:{number}"])
+        except Exception as exc:
+            _emit_ivr("ivr_log", {"msg": f"❌ Error marcando {number}: {exc}", "level": "error"})
+            _save_call_result(number, "ADB_ERROR", None, str(exc))
+            _emit_ivr("ivr_call_update", {"number": number, "status": "ERROR",
+                                           "processed": self.processed, "total": self.total})
+            return
+
+        # — 2. Monitorear estado —————————————————————————————
+        call_stop  = threading.Event()
+        call_state = {"current": "CONNECTING"}
+
+        def on_state(state: str):
+            call_state["current"] = state
+            _emit_ivr("ivr_status", {"number": number, "state": state})
+            _emit_ivr("ivr_log", {"msg": f"  ↳ Estado: {state}", "level": "info"})
+
+            if state == "ACTIVE":
+                call_stop.set()   # salir del monitor, manejar en hilo principal
+            elif state == "DISCONNECTED":
+                call_stop.set()
+
+        if _MONITOR_OK:
+            monitor = CallMonitor(device_id=self.device_id)
+            monitor.start(on_state_change=on_state, stop_event=call_stop, clear_logs=True)
+        else:
+            # Sin CallMonitor: esperar 3 s y asumir ACTIVE (modo degradado)
+            time.sleep(3)
+            call_state["current"] = "ACTIVE"
+
+        # Esperar hasta 60 s a que la llamada se conecte o desconecte
+        deadline = time.time() + 60
+        while not call_stop.is_set() and not self._stop_event.is_set():
+            if time.time() > deadline:
+                break
+            time.sleep(0.2)
+
+        final_state = call_state["current"]
+
+        # — 3. Reaccionar al estado ——————————————————————————
+        if final_state == "ACTIVE":
+            result_status, result_digit = self._handle_active(number)
+        elif final_state in ("DISCONNECTED", "CONNECTING", "DIALING"):
+            result_status = "NO_ANSWER" if final_state != "DISCONNECTED" else "DISCONNECTED"
+        else:
+            result_status = "UNKNOWN"
+
+        if _MONITOR_OK:
+            call_stop.set()
+            monitor.stop()
+
+        # — 4. Asegurar que la llamada esté colgada ——————————
+        self._hang_up()
+
+        # — 5. Guardar resultado ———————————————————————————
+        _save_call_result(number, result_status, result_digit)
+        _emit_ivr("ivr_call_update", {
+            "number": number, "status": result_status,
+            "digit": result_digit,
+            "processed": self.processed, "total": self.total
+        })
+        _emit_ivr("ivr_log", {
+            "msg": f"  ✔ {number} → {result_status}" + (f" (opción: {result_digit})" if result_digit else ""),
+            "level": "success"
+        })
+
+    def _handle_active(self, number: str) -> tuple[str, str | None]:
+        """
+        La llamada fue contestada (ACTIVE).
+        Reproduce audio inicial, espera tono, actúa.
+        Retorna (status, digit_detectado)
+        """
+        _emit_ivr("ivr_log", {"msg": "  🎵 Llamada contestada — reproduciendo audio inicial", "level": "success"})
+
+        # Reproducir audio inicial
+        _play_audio(self.audio_initial)
+        if self._stop_event.is_set():
+            return "STOPPED", None
+
+        # Esperar tono DTMF del cliente (con reintentos usando audio intermedio)
+        for attempt in range(2):  # máx 2 intentos
+            self._digit_event.clear()
+            self._last_digit = None
+
+            _emit_ivr("ivr_log", {"msg": f"  👂 Esperando tono ({self.tone_timeout}s)…", "level": "info"})
+            self._digit_event.wait(timeout=self.tone_timeout)
+
+            if self._stop_event.is_set():
+                return "STOPPED", None
+
+            digit = self._last_digit
+            if digit and digit in self.ivr_options:
+                desc = self.ivr_options[digit]
+                _emit_ivr("ivr_log", {"msg": f"  ✅ Tono detectado: {digit} — {desc}", "level": "success"})
+                _emit_ivr("ivr_digit", {"number": number, "digit": digit, "option": desc})
+
+                # Reproducir despedida y colgar
+                _play_audio(self.audio_bye)
+                self._hang_up()
+                return "ANSWERED_TONE", digit
+
+            elif digit:
+                # Dígito detectado pero no configurado
+                _emit_ivr("ivr_log", {"msg": f"  ⚠️ Tono {digit} no configurado — ignorando", "level": "warn"})
+
+            # No tono válido → reproducir audio intermedio si hay
+            if attempt == 0 and self.audio_middle:
+                _emit_ivr("ivr_log", {"msg": "  🔄 Reproduciendo mensaje intermedio", "level": "info"})
+                _play_audio(self.audio_middle)
+
+        # No se detectó tono válido en los intentos
+        _emit_ivr("ivr_log", {"msg": "  ⏰ Sin tono válido — colgando", "level": "warn"})
+        self._hang_up()
+        return "ANSWERED_NO_TONE", None
+
+    # ── Helpers ADB ──────────────────────────────────────────────
+
+    def _adb(self, args: list):
+        cmd = ["adb"]
+        if self.device_id:
+            cmd += ["-s", self.device_id]
+        cmd += args
+        return subprocess.run(cmd, capture_output=True, timeout=10)
+
+    def _hang_up(self):
+        try:
+            self._adb(["shell", "input", "keyevent", "6"])  # KEYCODE_ENDCALL
+        except Exception:
+            pass
+
+    def _interruptible_sleep(self, seconds: float):
+        deadline = time.time() + seconds
+        while time.time() < deadline and not self._stop_event.is_set():
+            time.sleep(0.2)
+
+
+# ══════════════════════════════════════════════
+#  IVR AUTOMATOR — Rutas Flask
+# ══════════════════════════════════════════════
+
+@app.route("/ivr/devices")
+def ivr_devices():
+    """Lista los dispositivos ADB conectados."""
+    try:
+        result = subprocess.run(["adb", "devices"], capture_output=True, text=True, timeout=5)
+        lines = result.stdout.strip().splitlines()
+        devices = []
+        for line in lines[1:]:  # saltar cabecera
+            line = line.strip()
+            if line and "\t" in line:
+                serial, state = line.split("\t", 1)
+                if state.strip() == "device":
+                    devices.append(serial.strip())
+        return jsonify({"ok": True, "devices": devices})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/ivr/upload_numbers", methods=["POST"])
+def ivr_upload_numbers():
+    """Recibe un Excel, extrae la columna 'Celular' y devuelve la lista."""
+    if not _OPENPYXL_OK:
+        return jsonify({"ok": False, "error": "openpyxl no instalado"}), 500
+
+    f = request.files.get("file")
+    if not f:
+        return jsonify({"ok": False, "error": "No se recibió archivo"}), 400
+
+    try:
+        wb = openpyxl.load_workbook(f, read_only=True, data_only=True)
+        ws = wb.active
+
+        headers = [str(c.value).strip() if c.value else "" for c in next(ws.iter_rows(min_row=1, max_row=1))]
+        col_idx = None
+        for i, h in enumerate(headers):
+            if h.lower() == "celular":
+                col_idx = i
+                break
+
+        if col_idx is None:
+            return jsonify({"ok": False, "error": "No se encontró la columna 'Celular'"}), 400
+
+        numbers = []
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            val = row[col_idx] if col_idx < len(row) else None
+            if val is not None:
+                num = str(val).strip().replace(" ", "").replace("-", "")
+                if num:
+                    numbers.append(num)
+
+        wb.close()
+        return jsonify({"ok": True, "numbers": numbers, "count": len(numbers)})
+    except Exception as exc:
+        traceback.print_exc()
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/ivr/upload_audio", methods=["POST"])
+def ivr_upload_audio():
+    """Guarda un archivo de audio para uso en el IVR. Tipo: 'initial'|'middle'|'bye'."""
+    f = request.files.get("file")
+    audio_type = request.form.get("type", "initial")  # initial | middle | bye
+    if not f:
+        return jsonify({"ok": False, "error": "No se recibió archivo"}), 400
+
+    ext = os.path.splitext(f.filename)[1].lower()
+    safe_name = f"ivr_{audio_type}{ext}"
+    dest = os.path.join(IVR_AUDIO_FOLDER, safe_name)
+    f.save(dest)
+    return jsonify({"ok": True, "path": dest, "filename": f.filename, "type": audio_type})
+
+
+@app.route("/ivr/start", methods=["POST"])
+def ivr_start():
+    """Inicia una campaña o una prueba con 1 número."""
+    global _ivr_campaign
+    with _ivr_lock:
+        if _ivr_campaign and _ivr_campaign.is_running:
+            return jsonify({"ok": False, "error": "Ya hay una campaña activa"}), 409
+
+    data = request.get_json(force=True) or {}
+
+    # Validar
+    numbers = data.get("numbers", [])
+    if not numbers:
+        return jsonify({"ok": False, "error": "Sin números en la cola"}), 400
+
+    config = {
+        "numbers":       numbers,
+        "device_id":     data.get("device_id"),
+        "delay_seconds": data.get("delay_seconds", 5),
+        "audio_initial": data.get("audio_initial"),
+        "audio_middle":  data.get("audio_middle"),
+        "audio_bye":     data.get("audio_bye"),
+        "ivr_options":   data.get("ivr_options", {}),
+        "tone_timeout":  data.get("tone_timeout", 10),
+        "is_test":       data.get("is_test", False),
+    }
+
+    with _ivr_lock:
+        _ivr_campaign = IVRCampaign(config)
+        _ivr_campaign.start()
+
+    mode = "prueba" if config["is_test"] else "campaña"
+    return jsonify({"ok": True, "msg": f"{mode.capitalize()} iniciada", "total": len(numbers)})
+
+
+@app.route("/ivr/stop", methods=["POST"])
+def ivr_stop():
+    """Detiene la campaña activa."""
+    global _ivr_campaign
+    with _ivr_lock:
+        if not _ivr_campaign or not _ivr_campaign.is_running:
+            return jsonify({"ok": False, "error": "No hay campaña activa"}), 409
+        _ivr_campaign.stop()
+    return jsonify({"ok": True, "msg": "Campaña detenida"})
+
+
+@app.route("/ivr/status")
+def ivr_status():
+    """Estado actual de la campaña."""
+    global _ivr_campaign
+    if not _ivr_campaign:
+        return jsonify({"running": False, "processed": 0, "total": 0})
+    return jsonify({
+        "running":   _ivr_campaign.is_running,
+        "processed": _ivr_campaign.processed,
+        "total":     _ivr_campaign.total,
+    })
+
+
+@app.route("/ivr/results")
+def ivr_results():
+    """Descarga el CSV de resultados."""
+    if not os.path.isfile(IVR_RESULTS_CSV):
+        return jsonify({"ok": False, "error": "Sin resultados aún"}), 404
+    from flask import send_file
+    return send_file(IVR_RESULTS_CSV, as_attachment=True,
+                     download_name="ivr_results.csv", mimetype="text/csv")
 
 
 if __name__ == "__main__":

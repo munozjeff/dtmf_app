@@ -557,3 +557,465 @@ newBtn.addEventListener("click", () => {
   });
 
 })();
+
+// ══════════════════════════════════════════════
+//  SISTEMA DE TABS
+// ══════════════════════════════════════════════
+(function initTabs() {
+  // Secciones controladas por tabs
+  // analyzer → hero + upload + progress + error + results
+  // monitor  → monitor-section  (id="monitor")
+  // ivr      → ivr-section
+  const TAB_SECTIONS = {
+    analyzer: ["hero", "upload-section", "progress-section", "error-section", "results-section"],
+    monitor:  ["monitor"],
+    ivr:      ["ivr-section"],
+  };
+
+  const tabs = document.querySelectorAll(".header-tab");
+
+  function switchTab(tabName) {
+    // Ocultar todas las secciones de todos los tabs
+    Object.values(TAB_SECTIONS).flat().forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.hidden = true;
+    });
+
+    // Mostrar secciones del tab activo
+    (TAB_SECTIONS[tabName] || []).forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.hidden = false;
+    });
+
+    // Actualizar clases
+    tabs.forEach(t => t.classList.toggle("active", t.dataset.tab === tabName));
+
+    // Cuando se activa el IVR, recargar dispositivos
+    if (tabName === "ivr") {
+      ivrLoadDevices();
+    }
+  }
+
+  tabs.forEach(tab => {
+    tab.addEventListener("click", () => switchTab(tab.dataset.tab));
+  });
+
+  // Arrancar en tab "analyzer"
+  switchTab("analyzer");
+})();
+
+// ══════════════════════════════════════════════
+//  IVR AUTOMATOR MODULE
+// ══════════════════════════════════════════════
+(function initIVR() {
+  "use strict";
+
+  // ── Estado local ──────────────────────────────────────────────
+  let ivrNumbers      = [];       // lista cargada del Excel
+  let ivrAudioPaths   = {};       // { initial, middle, bye } → rutas en servidor
+  let ivrQueueRows    = {};       // número → <tr> en la tabla
+  let ivrSocket       = null;     // socket compartido (si el monitor ya lo abrió)
+  let ivrRunning      = false;
+
+  // ── DOM refs ─────────────────────────────────────────────────
+  const deviceSelect    = document.getElementById("ivr-device");
+  const refreshDevBtn   = document.getElementById("ivr-refresh-devices");
+  const excelInput      = document.getElementById("ivr-excel-input");
+  const excelName       = document.getElementById("ivr-excel-name");
+  const numbersBadge    = document.getElementById("ivr-numbers-badge");
+  const numbersCount    = document.getElementById("ivr-numbers-count");
+
+  const audioInitInput  = document.getElementById("ivr-audio-initial-input");
+  const audioInitName   = document.getElementById("ivr-audio-initial-name");
+  const audioMidInput   = document.getElementById("ivr-audio-middle-input");
+  const audioMidName    = document.getElementById("ivr-audio-middle-name");
+  const audioByeInput   = document.getElementById("ivr-audio-bye-input");
+  const audioByeName    = document.getElementById("ivr-audio-bye-name");
+
+  const delayInput      = document.getElementById("ivr-delay");
+  const toneTimeoutInput= document.getElementById("ivr-tone-timeout");
+  const optionsList     = document.getElementById("ivr-options-list");
+  const addOptionBtn    = document.getElementById("ivr-add-option");
+
+  const testBtn         = document.getElementById("ivr-test-btn");
+  const launchBtn       = document.getElementById("ivr-launch-btn");
+  const stopBtn         = document.getElementById("ivr-stop-btn");
+
+  const progressBar     = document.getElementById("ivr-progress-bar");
+  const statProcessed   = document.getElementById("ivr-stat-processed");
+  const statTotal       = document.getElementById("ivr-stat-total");
+  const campaignStatus  = document.getElementById("ivr-campaign-status");
+  const currentCallDiv  = document.getElementById("ivr-current-call");
+  const callNumberEl    = document.getElementById("ivr-call-number");
+  const callBadgesEl    = document.getElementById("ivr-call-state-badges");
+  const downloadBtn     = document.getElementById("ivr-download-btn");
+
+  const queueTbody      = document.getElementById("ivr-queue-tbody");
+  const logEl           = document.getElementById("ivr-log");
+
+  const testModal       = document.getElementById("ivr-test-modal");
+  const testNumberInput = document.getElementById("ivr-test-number");
+  const testCancelBtn   = document.getElementById("ivr-test-cancel");
+  const testConfirmBtn  = document.getElementById("ivr-test-confirm");
+  const clearLogBtn     = document.getElementById("ivr-clear-log");
+
+  // ── Helpers ───────────────────────────────────────────────────
+
+  function ivrLog(msg, level = "info") {
+    const now = new Date();
+    const ts  = `${String(now.getHours()).padStart(2,"0")}:${String(now.getMinutes()).padStart(2,"0")}:${String(now.getSeconds()).padStart(2,"0")}`;
+    const div = document.createElement("div");
+    div.className = `ivr-log-entry lvl-${level}`;
+    div.innerHTML = `<span class="ivr-log-time">${ts}</span><span class="ivr-log-msg">${msg}</span>`;
+    logEl.appendChild(div);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  function pillClass(status) {
+    const map = {
+      PENDING: "pill-pending", CALLING: "pill-calling",
+      ANSWERED_TONE: "pill-tone", ANSWERED_NO_TONE: "pill-answered",
+      NO_ANSWER: "pill-no-answer", DISCONNECTED: "pill-no-answer",
+      ADB_ERROR: "pill-error", ERROR: "pill-error", STOPPED: "pill-no-answer",
+    };
+    return map[status] || "pill-pending";
+  }
+
+  function pillLabel(status) {
+    const map = {
+      PENDING: "Pendiente", CALLING: "Marcando…",
+      ANSWERED_TONE: "Tono detectado", ANSWERED_NO_TONE: "Sin tono",
+      NO_ANSWER: "No contestó", DISCONNECTED: "Cortó",
+      ADB_ERROR: "Error ADB", ERROR: "Error", STOPPED: "Detenido",
+    };
+    return map[status] || status;
+  }
+
+  function buildIVROptions() {
+    const opts = {};
+    optionsList.querySelectorAll(".ivr-option-row").forEach(row => {
+      const digit = row.querySelector(".ivr-option-digit").value.trim();
+      const desc  = row.querySelector(".ivr-option-desc").value.trim();
+      if (digit && desc) opts[digit] = desc;
+    });
+    return opts;
+  }
+
+  function buildConfig(numbers) {
+    return {
+      numbers,
+      device_id:     deviceSelect.value || null,
+      delay_seconds: parseInt(delayInput.value) || 5,
+      tone_timeout:  parseInt(toneTimeoutInput.value) || 10,
+      audio_initial: ivrAudioPaths.initial || null,
+      audio_middle:  ivrAudioPaths.middle  || null,
+      audio_bye:     ivrAudioPaths.bye     || null,
+      ivr_options:   buildIVROptions(),
+    };
+  }
+
+  function validateConfig() {
+    if (!deviceSelect.value) {
+      ivrLog("⚠️ Selecciona un dispositivo ADB primero", "warn"); return false;
+    }
+    if (Object.keys(buildIVROptions()).length === 0) {
+      ivrLog("⚠️ Configura al menos una opción IVR (dígito → descripción)", "warn"); return false;
+    }
+    return true;
+  }
+
+  // ── Dispositivos ADB ─────────────────────────────────────────
+
+  async function ivrLoadDevices() {
+    deviceSelect.innerHTML = "<option value=''>Cargando…</option>";
+    try {
+      const r = await fetch("/ivr/devices");
+      const d = await r.json();
+      deviceSelect.innerHTML = "<option value=''>— Seleccionar dispositivo —</option>";
+      if (d.devices && d.devices.length) {
+        d.devices.forEach(dev => {
+          const opt = document.createElement("option");
+          opt.value = dev;
+          opt.textContent = dev;
+          deviceSelect.appendChild(opt);
+        });
+        ivrLog(`✅ ${d.devices.length} dispositivo(s) detectado(s)`, "success");
+      } else {
+        ivrLog("⚠️ Sin dispositivos ADB conectados", "warn");
+      }
+    } catch (e) {
+      deviceSelect.innerHTML = "<option value=''>Error ADB</option>";
+      ivrLog(`❌ Error conectando ADB: ${e.message}`, "error");
+    }
+  }
+
+  refreshDevBtn.addEventListener("click", ivrLoadDevices);
+
+  // ── Carga de Excel ───────────────────────────────────────────
+
+  excelInput.addEventListener("change", async () => {
+    const file = excelInput.files[0];
+    if (!file) return;
+    excelName.textContent = file.name;
+    ivrLog(`📂 Cargando Excel: ${file.name}…`);
+
+    const fd = new FormData();
+    fd.append("file", file);
+    try {
+      const r = await fetch("/ivr/upload_numbers", { method: "POST", body: fd });
+      const d = await r.json();
+      if (d.ok) {
+        ivrNumbers = d.numbers;
+        numbersCount.textContent = `${d.count} números cargados`;
+        numbersBadge.hidden = false;
+        ivrLog(`✅ ${d.count} números listos para marcar`, "success");
+        updateLaunchBtn();
+        buildQueueTable();
+      } else {
+        ivrLog(`❌ ${d.error}`, "error");
+      }
+    } catch (e) {
+      ivrLog(`❌ Error subiendo Excel: ${e.message}`, "error");
+    }
+  });
+
+  // ── Carga de audios ──────────────────────────────────────────
+
+  async function uploadAudio(file, type, nameEl) {
+    nameEl.textContent = "Subiendo…";
+    const fd = new FormData();
+    fd.append("file", file);
+    fd.append("type", type);
+    try {
+      const r = await fetch("/ivr/upload_audio", { method: "POST", body: fd });
+      const d = await r.json();
+      if (d.ok) {
+        ivrAudioPaths[type] = d.path;
+        nameEl.textContent = file.name;
+        ivrLog(`🎵 Audio ${type} cargado: ${file.name}`, "success");
+      } else {
+        nameEl.textContent = "Error";
+        ivrLog(`❌ Error: ${d.error}`, "error");
+      }
+    } catch (e) {
+      nameEl.textContent = "Error";
+      ivrLog(`❌ ${e.message}`, "error");
+    }
+  }
+
+  audioInitInput.addEventListener("change", () => {
+    if (audioInitInput.files[0]) uploadAudio(audioInitInput.files[0], "initial", audioInitName);
+  });
+  audioMidInput.addEventListener("change", () => {
+    if (audioMidInput.files[0]) uploadAudio(audioMidInput.files[0], "middle", audioMidName);
+  });
+  audioByeInput.addEventListener("change", () => {
+    if (audioByeInput.files[0]) uploadAudio(audioByeInput.files[0], "bye", audioByeName);
+  });
+
+  // ── Opciones IVR dinámicas ───────────────────────────────────
+
+  function addOptionRow(digit = "", desc = "") {
+    const row = document.createElement("div");
+    row.className = "ivr-option-row";
+    row.innerHTML = `
+      <input class="ivr-input ivr-option-digit" type="text" maxlength="1"
+             placeholder="1" value="${digit}" title="Dígito DTMF" />
+      <input class="ivr-input ivr-option-desc" type="text"
+             placeholder="Descripción (ej: Interesado)" value="${desc}" />
+      <button class="ivr-option-remove" title="Eliminar">✕</button>
+    `;
+    row.querySelector(".ivr-option-remove").addEventListener("click", () => row.remove());
+    optionsList.appendChild(row);
+  }
+
+  addOptionBtn.addEventListener("click", () => addOptionRow());
+  // Agregar una opción por defecto al cargar
+  addOptionRow("1", "Interesado");
+
+  // ── Cola visual ──────────────────────────────────────────────
+
+  function buildQueueTable() {
+    queueTbody.innerHTML = "";
+    ivrQueueRows = {};
+    ivrNumbers.forEach((num, i) => {
+      const tr = document.createElement("tr");
+      tr.id = `ivr-row-${num}`;
+      tr.innerHTML = `
+        <td style="color:var(--text-dim);font-family:var(--mono)">${i + 1}</td>
+        <td style="font-family:var(--mono);font-weight:600">${num}</td>
+        <td><span class="ivr-status-pill pill-pending" id="ivr-pill-${num}">Pendiente</span></td>
+        <td><span class="ivr-digit-result" id="ivr-digit-${num}">—</span></td>
+      `;
+      queueTbody.appendChild(tr);
+      ivrQueueRows[num] = tr;
+    });
+  }
+
+  function updateQueueRow(number, status, digit) {
+    const pill = document.getElementById(`ivr-pill-${number}`);
+    const digitEl = document.getElementById(`ivr-digit-${number}`);
+    const tr = document.getElementById(`ivr-row-${number}`);
+    if (pill) {
+      pill.className = `ivr-status-pill ${pillClass(status)}`;
+      pill.textContent = pillLabel(status);
+    }
+    if (digitEl && digit) {
+      const color = DIGIT_COLORS[digit] || "#6366f1";
+      digitEl.innerHTML = `<span style="background:${color};color:#fff;padding:2px 8px;border-radius:6px;font-weight:700;font-family:var(--mono)">${digit}</span>`;
+    }
+    if (tr) {
+      tr.className = status === "CALLING" ? "row-calling"
+                   : ["ADB_ERROR","ERROR"].includes(status) ? "row-error"
+                   : status !== "PENDING" ? "row-done" : "";
+    }
+  }
+
+  // ── Launch / Stop ────────────────────────────────────────────
+
+  function updateLaunchBtn() {
+    launchBtn.disabled = ivrNumbers.length === 0 || ivrRunning;
+  }
+
+  async function startCampaign(numbers, isTest = false) {
+    if (!validateConfig()) return;
+    const config = { ...buildConfig(numbers), is_test: isTest };
+
+    ivrRunning = true;
+    updateLaunchBtn();
+    stopBtn.disabled = false;
+    campaignStatus.textContent = isTest ? "Prueba activa" : "En curso";
+    campaignStatus.style.color = "var(--green)";
+    currentCallDiv.hidden = false;
+    downloadBtn.style.display = "none";
+
+    connectIvrSocket();
+
+    try {
+      const r = await fetch("/ivr/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(config),
+      });
+      const d = await r.json();
+      if (!d.ok) {
+        ivrLog(`❌ ${d.error}`, "error");
+        onCampaignEnd();
+      } else {
+        statTotal.textContent = d.total;
+        ivrLog(`🚀 ${d.msg}`, "success");
+      }
+    } catch (e) {
+      ivrLog(`❌ Error de red: ${e.message}`, "error");
+      onCampaignEnd();
+    }
+  }
+
+  stopBtn.addEventListener("click", async () => {
+    try {
+      await fetch("/ivr/stop", { method: "POST" });
+      ivrLog("⏹ Campaña detenida por el usuario", "warn");
+    } catch (e) {
+      ivrLog(`❌ ${e.message}`, "error");
+    }
+  });
+
+  launchBtn.addEventListener("click", () => {
+    if (!validateConfig()) return;
+    if (ivrNumbers.length === 0) {
+      ivrLog("⚠️ Carga un Excel con números primero", "warn"); return;
+    }
+    statTotal.textContent = ivrNumbers.length;
+    statProcessed.textContent = "0";
+    progressBar.style.width = "0%";
+    buildQueueTable();
+    startCampaign(ivrNumbers, false);
+  });
+
+  // ── Prueba ───────────────────────────────────────────────────
+
+  testBtn.addEventListener("click", () => {
+    testNumberInput.value = "";
+    testModal.hidden = false;
+    setTimeout(() => testNumberInput.focus(), 50);
+  });
+  testCancelBtn.addEventListener("click", () => { testModal.hidden = true; });
+  testConfirmBtn.addEventListener("click", () => {
+    const num = testNumberInput.value.trim().replace(/\s|-/g, "");
+    if (!num) { ivrLog("⚠️ Ingresa un número válido", "warn"); return; }
+    testModal.hidden = true;
+    ivrNumbers = [num]; // temporal para la prueba
+    buildQueueTable();
+    statTotal.textContent = 1;
+    statProcessed.textContent = "0";
+    progressBar.style.width = "0%";
+    startCampaign([num], true);
+  });
+  testModal.addEventListener("click", e => { if (e.target === testModal) testModal.hidden = true; });
+
+  // ── Socket.IO IVR ────────────────────────────────────────────
+
+  function connectIvrSocket() {
+    if (ivrSocket && ivrSocket.connected) return;
+    ivrSocket = io("http://localhost:5050", { transports: ["websocket"] });
+
+    ivrSocket.on("ivr_log", data => {
+      ivrLog(data.msg, data.level || "info");
+    });
+
+    ivrSocket.on("ivr_status", data => {
+      // Actualizar badge de estado de la llamada actual
+      const stateLabel = data.state;
+      const cls = stateLabel.toLowerCase();
+      callBadgesEl.innerHTML = `
+        <span class="ivr-state-badge ${cls}">
+          ${stateLabel === "ACTIVE" ? "✅" : stateLabel === "DISCONNECTED" ? "❌" : "🔄"}
+          ${stateLabel}
+        </span>`;
+    });
+
+    ivrSocket.on("ivr_call_update", data => {
+      const { number, status, digit, processed, total } = data;
+      if (number) callNumberEl.textContent = number;
+      if (processed !== undefined) {
+        statProcessed.textContent = processed;
+        const pct = total > 0 ? Math.round((processed / total) * 100) : 0;
+        progressBar.style.width = `${pct}%`;
+      }
+      if (status === "CALLING") {
+        callBadgesEl.innerHTML = `<span class="ivr-state-badge calling">📞 MARCANDO</span>`;
+      }
+      updateQueueRow(number, status, digit);
+    });
+
+    ivrSocket.on("ivr_digit", data => {
+      const { number, digit, option } = data;
+      ivrLog(`🎯 ${number} → opción ${digit}: ${option}`, "success");
+      updateQueueRow(number, "ANSWERED_TONE", digit);
+    });
+
+    ivrSocket.on("ivr_campaign_done", data => {
+      onCampaignEnd(data);
+    });
+  }
+
+  function onCampaignEnd(data) {
+    ivrRunning = false;
+    updateLaunchBtn();
+    stopBtn.disabled = true;
+    campaignStatus.textContent = "Completada";
+    campaignStatus.style.color = "var(--cyan)";
+    currentCallDiv.hidden = true;
+    downloadBtn.style.display = "";
+    if (data) {
+      ivrLog(`✅ Campaña terminada — ${data.processed}/${data.total} procesados`, "success");
+    }
+    if (ivrSocket) { ivrSocket.disconnect(); ivrSocket = null; }
+  }
+
+  clearLogBtn.addEventListener("click", () => { logEl.innerHTML = ""; });
+
+  // Log inicial
+  ivrLog("IVR Automator listo. Configura y lanza tu campaña.", "info");
+
+})();

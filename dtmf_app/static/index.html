@@ -36,6 +36,12 @@
       </div>
       <span class="logo-text">DTMF<span class="logo-accent">Analyzer</span></span>
     </div>
+    <!-- Tab navigation -->
+    <nav class="header-tabs" id="header-tabs">
+      <button class="header-tab active" data-tab="analyzer" id="tab-analyzer">📊 Analizador</button>
+      <button class="header-tab" data-tab="monitor" id="tab-monitor">🎙️ Monitor</button>
+      <button class="header-tab" data-tab="ivr" id="tab-ivr">📞 IVR Automator</button>
+    </nav>
     <div class="header-badge">
       <span class="badge-dot"></span>
       Servidor activo
@@ -244,8 +250,178 @@
 
   </section>
 
+  <!-- ══ IVR AUTOMATOR ══ -->
+  <section class="ivr-section" id="ivr-section" hidden>
+
+    <!-- ── Panel de Configuración ── -->
+    <div class="ivr-grid">
+      <div class="card ivr-config-card">
+        <h2 class="ivr-panel-title">⚙️ Configuración de Campaña</h2>
+
+        <!-- Dispositivo ADB -->
+        <div class="ivr-field">
+          <label class="ivr-label" for="ivr-device">Dispositivo ADB</label>
+          <div class="ivr-row">
+            <select class="ivr-select" id="ivr-device">
+              <option value="">— Seleccionar dispositivo —</option>
+            </select>
+            <button class="btn btn-ghost btn-sm" id="ivr-refresh-devices" title="Actualizar dispositivos">
+              🔄
+            </button>
+          </div>
+        </div>
+
+        <!-- Excel con números -->
+        <div class="ivr-field">
+          <label class="ivr-label">Lista de números (Excel)</label>
+          <div class="ivr-file-row">
+            <label class="btn btn-ghost btn-sm" for="ivr-excel-input">📂 Cargar Excel</label>
+            <input type="file" id="ivr-excel-input" accept=".xlsx,.xls" hidden />
+            <span class="ivr-file-name" id="ivr-excel-name">Sin archivo</span>
+          </div>
+          <div class="ivr-badge-row" id="ivr-numbers-badge" hidden>
+            <span class="ivr-badge ivr-badge-blue" id="ivr-numbers-count"></span>
+          </div>
+        </div>
+
+        <!-- Audio inicial -->
+        <div class="ivr-field">
+          <label class="ivr-label">Audio inicial (mensaje principal)</label>
+          <div class="ivr-file-row">
+            <label class="btn btn-ghost btn-sm" for="ivr-audio-initial-input">🎵 Cargar audio</label>
+            <input type="file" id="ivr-audio-initial-input" accept="audio/*,video/*" hidden />
+            <span class="ivr-file-name" id="ivr-audio-initial-name">Sin archivo</span>
+          </div>
+        </div>
+
+        <!-- Audio intermedio -->
+        <div class="ivr-field">
+          <label class="ivr-label">Audio intermedio (si no hay tono)</label>
+          <div class="ivr-file-row">
+            <label class="btn btn-ghost btn-sm" for="ivr-audio-middle-input">🎵 Cargar audio</label>
+            <input type="file" id="ivr-audio-middle-input" accept="audio/*,video/*" hidden />
+            <span class="ivr-file-name" id="ivr-audio-middle-name">Sin archivo</span>
+          </div>
+        </div>
+
+        <!-- Audio despedida -->
+        <div class="ivr-field">
+          <label class="ivr-label">Audio de despedida (tras tono detectado)</label>
+          <div class="ivr-file-row">
+            <label class="btn btn-ghost btn-sm" for="ivr-audio-bye-input">🎵 Cargar audio</label>
+            <input type="file" id="ivr-audio-bye-input" accept="audio/*,video/*" hidden />
+            <span class="ivr-file-name" id="ivr-audio-bye-name">Sin archivo</span>
+          </div>
+        </div>
+
+        <!-- Delay entre llamadas -->
+        <div class="ivr-field">
+          <label class="ivr-label" for="ivr-delay">Segundos entre llamadas</label>
+          <input class="ivr-input" type="number" id="ivr-delay" value="5" min="1" max="300" />
+        </div>
+
+        <!-- Timeout espera de tono -->
+        <div class="ivr-field">
+          <label class="ivr-label" for="ivr-tone-timeout">Segundos de espera de tono</label>
+          <input class="ivr-input" type="number" id="ivr-tone-timeout" value="10" min="3" max="60" />
+        </div>
+
+        <!-- Opciones IVR -->
+        <div class="ivr-field">
+          <label class="ivr-label">Opciones IVR (dígito → descripción)</label>
+          <div class="ivr-options-list" id="ivr-options-list">
+            <!-- Se llena dinámicamente -->
+          </div>
+          <button class="btn btn-ghost btn-sm ivr-add-option" id="ivr-add-option">+ Agregar opción</button>
+        </div>
+
+        <!-- Acciones -->
+        <div class="ivr-actions">
+          <button class="btn btn-ghost" id="ivr-test-btn">
+            ▶ Probar sistema
+          </button>
+          <button class="btn btn-primary" id="ivr-launch-btn" disabled>
+            🚀 Lanzar campaña
+          </button>
+        </div>
+      </div>
+
+      <!-- ── Panel de Campaña ── -->
+      <div class="ivr-right-col">
+
+        <!-- Progreso -->
+        <div class="card ivr-progress-card" id="ivr-progress-card">
+          <div class="ivr-progress-header">
+            <h3 class="ivr-panel-title" style="margin:0">📊 Progreso</h3>
+            <button class="btn btn-ghost btn-sm" id="ivr-stop-btn" disabled>⏹ Detener</button>
+          </div>
+          <div class="ivr-progress-bar-wrap">
+            <div class="ivr-progress-bar" id="ivr-progress-bar" style="width:0%"></div>
+          </div>
+          <div class="ivr-progress-stats">
+            <span id="ivr-stat-processed">0</span> / <span id="ivr-stat-total">0</span> llamadas
+            &nbsp;|&nbsp; Estado: <span class="ivr-status-text" id="ivr-campaign-status">Inactivo</span>
+          </div>
+
+          <!-- Llamada actual -->
+          <div class="ivr-current-call" id="ivr-current-call" hidden>
+            <div class="ivr-call-number" id="ivr-call-number"></div>
+            <div class="ivr-call-state-badges" id="ivr-call-state-badges"></div>
+          </div>
+
+          <!-- Botón descargar resultados -->
+          <a class="btn btn-ghost btn-sm" id="ivr-download-btn" href="/ivr/results" download style="margin-top:10px;display:none">
+            ⬇️ Descargar resultados CSV
+          </a>
+        </div>
+
+        <!-- Cola de números -->
+        <div class="card ivr-queue-card">
+          <h3 class="ivr-panel-title">📋 Cola de llamadas</h3>
+          <div class="ivr-queue-table-wrap">
+            <table class="ivr-queue-table" id="ivr-queue-table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Número</th>
+                  <th>Estado</th>
+                  <th>Tono</th>
+                </tr>
+              </thead>
+              <tbody id="ivr-queue-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Log de eventos -->
+        <div class="card ivr-log-card">
+          <div class="ivr-log-header">
+            <h3 class="ivr-panel-title" style="margin:0">🖥️ Log en tiempo real</h3>
+            <button class="btn btn-ghost btn-sm" id="ivr-clear-log">Limpiar</button>
+          </div>
+          <div class="ivr-log" id="ivr-log"></div>
+        </div>
+
+      </div><!-- /ivr-right-col -->
+    </div><!-- /ivr-grid -->
+
+    <!-- Modal prueba -->
+    <div class="ivr-modal-backdrop" id="ivr-test-modal" hidden>
+      <div class="ivr-modal">
+        <h3>▶ Prueba de sistema</h3>
+        <p>Ingresa el número al que se realizará la llamada de prueba:</p>
+        <input class="ivr-input" type="tel" id="ivr-test-number" placeholder="Ej: 3001234567" />
+        <div class="ivr-modal-actions">
+          <button class="btn btn-ghost" id="ivr-test-cancel">Cancelar</button>
+          <button class="btn btn-primary" id="ivr-test-confirm">Llamar</button>
+        </div>
+      </div>
+    </div>
+
+  </section>
+
   <!-- ══ MONITOR EN TIEMPO REAL ══ -->
-  <section class="monitor-section" id="monitor-section">
+  <section class="monitor-section" id="monitor" hidden>
     <div class="monitor-header">
       <div class="monitor-title-row">
         <div class="monitor-icon">
