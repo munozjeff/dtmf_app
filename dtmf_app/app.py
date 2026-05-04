@@ -1085,22 +1085,31 @@ def ivr_audio_devices():
         return jsonify({"ok": False, "error": "sounddevice no instalado",
                         "inputs": [], "outputs": []}), 200
     try:
-        devices = sd.query_devices()
+        devices   = sd.query_devices()
         default_in  = sd.default.device[0]
         default_out = sd.default.device[1]
-        inputs, outputs = [], []
+
+        # Coleccionar entradas y salidas sin duplicar por nombre
+        seen_in, seen_out = set(), set()
+        inputs, outputs   = [], []
+
         for i, d in enumerate(devices):
-            base = {
-                "index": i,
-                "name": d["name"],
-                "samplerate": int(d["default_samplerate"]),
-            }
-            if d["max_input_channels"] > 0:
-                inputs.append({**base, "channels": d["max_input_channels"],
+            name = d["name"]
+            sr   = int(d["default_samplerate"])
+            base = {"index": i, "name": name, "samplerate": sr}
+
+            if d["max_input_channels"] >= 1 and name not in seen_in:
+                seen_in.add(name)
+                inputs.append({**base,
+                               "channels":   d["max_input_channels"],
                                "is_default": (i == default_in)})
-            if d["max_output_channels"] > 0:
-                outputs.append({**base, "channels": d["max_output_channels"],
+
+            if d["max_output_channels"] >= 1 and name not in seen_out:
+                seen_out.add(name)
+                outputs.append({**base,
+                                "channels":   d["max_output_channels"],
                                 "is_default": (i == default_out)})
+
         return jsonify({"ok": True, "inputs": inputs, "outputs": outputs})
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc), "inputs": [], "outputs": []}), 200

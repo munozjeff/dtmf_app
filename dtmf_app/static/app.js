@@ -2,7 +2,9 @@
 
 // ── Socket IVR ────────────────────────────────────────────────
 const ivrSocket = io("http://localhost:5050", { transports: ["websocket"] });
-ivrSocket.on("connect",       () => addLog("✅ Conectado al servidor IVR", "ok"));
+ivrSocket.on("connect", () => {
+  addLog("✅ Conectado al servidor IVR", "ok");
+});
 ivrSocket.on("disconnect",    () => addLog("⚠️ Desconectado del servidor", "warn"));
 ivrSocket.on("connect_error", e  => addLog("❌ Error conexión: " + e.message, "err"));
 ivrSocket.on("ivr_log",           d => addLog(d.msg, d.level === "success" ? "ok" : d.level === "error" ? "err" : d.level));
@@ -92,8 +94,14 @@ function endCampaign() {
 (function init() {
   const E = id => document.getElementById(id);
 
+  // Utilidad: ejecuta fn solo una vez cada `ms` milisegundos
+  function debounce(fn, ms) {
+    let t; return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+  }
+
   // ── Dispositivos de audio (Python los enumera) ──
-  async function loadAudioDevices() {
+  let _audioLoaded = false;
+  async function _loadAudioDevices() {
     try {
       const r = await fetch("/ivr/audio_devices");
       const d = await r.json();
@@ -134,8 +142,10 @@ function endCampaign() {
       }
     } catch(e) { addLog("❌ Error dispositivos audio: " + e.message, "err"); }
   }
+  // Versión con debounce — evita llamadas repetidas en reconexión del socket
+  const loadAudioDevices = debounce(_loadAudioDevices, 500);
 
-  E("ivr-refresh-audio")?.addEventListener("click", loadAudioDevices);
+  E("ivr-refresh-audio")?.addEventListener("click", _loadAudioDevices); // el botón siempre fuerza
   loadAudioDevices();
 
   // Cambio de dispositivo de entrada: detener monitor si estaba activo
@@ -190,7 +200,7 @@ function endCampaign() {
   });
 
   // ── Dispositivos ADB ──
-  async function loadADB() {
+  async function _loadADB() {
     try {
       const r = await fetch("/ivr/devices"); const d = await r.json();
       const sel = E("ivr-device"); if (!sel) return;
@@ -202,7 +212,8 @@ function endCampaign() {
       else addLog("⚠️ Sin dispositivos ADB conectados", "warn");
     } catch(e) { addLog("❌ Error ADB: " + e.message, "err"); }
   }
-  E("ivr-refresh-devices")?.addEventListener("click", loadADB);
+  const loadADB = debounce(_loadADB, 500);
+  E("ivr-refresh-devices")?.addEventListener("click", _loadADB);
   loadADB();
 
   // ── Excel ──
