@@ -1,1061 +1,381 @@
-/* ═══════════════════════════════════════════════════
-   DTMF Analyzer — Frontend Logic
-   ═══════════════════════════════════════════════════ */
-
 "use strict";
 
-// ── Color map (matches backend DIGIT_COLORS) ──────────────────
-const DIGIT_COLORS = {
-  "1":"#6366f1","2":"#8b5cf6","3":"#a855f7","4":"#ec4899",
-  "5":"#f43f5e","6":"#ef4444","7":"#f97316","8":"#eab308",
-  "9":"#22c55e","0":"#06b6d4","*":"#ffe082","#":"#e879f9",
-  "A":"#b39ddb","B":"#80cbc4","C":"#ffcc02","D":"#ff7043",
-};
+// ── Socket IVR ────────────────────────────────────────────────
+const ivrSocket = io("http://localhost:5050", { transports: ["websocket"] });
+ivrSocket.on("connect",       () => addLog("✅ Conectado al servidor IVR", "ok"));
+ivrSocket.on("disconnect",    () => addLog("⚠️ Desconectado del servidor", "warn"));
+ivrSocket.on("connect_error", e  => addLog("❌ Error conexión: " + e.message, "err"));
+ivrSocket.on("ivr_log",           d => addLog(d.msg, d.level === "success" ? "ok" : d.level === "error" ? "err" : d.level));
+ivrSocket.on("ivr_status",        d => onIvrStatus(d));
+ivrSocket.on("ivr_call_update",   d => onCallUpdate(d));
+ivrSocket.on("ivr_digit",         d => onIvrDigit(d));
+ivrSocket.on("ivr_campaign_done", () => endCampaign());
 
-// DTMF frequency lookup (for table display)
-const DTMF_FREQS = {
-  "1":"697+1209","2":"697+1336","3":"697+1477","A":"697+1633",
-  "4":"770+1209","5":"770+1336","6":"770+1477","B":"770+1633",
-  "7":"852+1209","8":"852+1336","9":"852+1477","C":"852+1633",
-  "*":"941+1209","0":"941+1336","#":"941+1477","D":"941+1633",
-};
-
-// ── DOM refs ──────────────────────────────────────────────────
-const dropZone       = document.getElementById("drop-zone");
-const fileInput      = document.getElementById("file-input");
-const filePreview    = document.getElementById("file-preview");
-const fileNameEl     = document.getElementById("file-name");
-const fileSizeEl     = document.getElementById("file-size");
-const removeBtn      = document.getElementById("remove-btn");
-const analyzeBtn     = document.getElementById("analyze-btn");
-const progressSec    = document.getElementById("progress-section");
-const progressLabel  = document.getElementById("progress-label");
-const errorSec       = document.getElementById("error-section");
-const errorMsg       = document.getElementById("error-msg");
-const retryBtn       = document.getElementById("retry-btn");
-const resultsSec     = document.getElementById("results-section");
-const seqDigitsEl    = document.getElementById("seq-digits");
-const copyBtn        = document.getElementById("copy-btn");
-const newBtn         = document.getElementById("new-btn");
-const chartImg       = document.getElementById("chart-img");
-const tonesTbody     = document.getElementById("tones-tbody");
-
-const STEPS = [
-  "step-upload", "step-convert", "step-noise",
-  "step-amplify", "step-goertzel", "step-chart"
-];
-
-let currentFile = null;
-let currentSequence = "";
-
-// ══════════════════════════════════════════════
-//  Background particles canvas
-// ══════════════════════════════════════════════
-(function initParticles() {
-  const canvas = document.getElementById("bg-canvas");
-  const ctx    = canvas.getContext("2d");
-  let W, H, particles;
-
-  const COLORS = ["#6366f1","#06b6d4","#a855f7","#22c55e","#f43f5e"];
-
-  function resize() {
-    W = canvas.width  = window.innerWidth;
-    H = canvas.height = window.innerHeight;
-  }
-
-  function makeParticle() {
-    return {
-      x: Math.random() * W,
-      y: Math.random() * H,
-      r: Math.random() * 1.8 + 0.4,
-      vx: (Math.random() - 0.5) * 0.3,
-      vy: (Math.random() - 0.5) * 0.3,
-      color: COLORS[Math.floor(Math.random() * COLORS.length)],
-      alpha: Math.random() * 0.5 + 0.15,
-    };
-  }
-
-  function init() {
-    resize();
-    particles = Array.from({ length: 110 }, makeParticle);
-  }
-
-  function draw() {
-    ctx.clearRect(0, 0, W, H);
-    for (const p of particles) {
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
-      ctx.fillStyle = p.color;
-      ctx.globalAlpha = p.alpha;
-      ctx.fill();
-      ctx.globalAlpha = 1;
-
-      p.x += p.vx;
-      p.y += p.vy;
-      if (p.x < -5) p.x = W + 5;
-      if (p.x > W + 5) p.x = -5;
-      if (p.y < -5) p.y = H + 5;
-      if (p.y > H + 5) p.y = -5;
-    }
-    requestAnimationFrame(draw);
-  }
-
-  window.addEventListener("resize", resize);
-  init();
-  draw();
-})();
-
-// ══════════════════════════════════════════════
-//  File handling
-// ══════════════════════════════════════════════
-function formatBytes(bytes) {
-  if (bytes < 1024)       return `${bytes} B`;
-  if (bytes < 1048576)    return `${(bytes/1024).toFixed(1)} KB`;
-  return `${(bytes/1048576).toFixed(2)} MB`;
-}
-
-function setFile(file) {
-  currentFile = file;
-  fileNameEl.textContent = file.name;
-  fileSizeEl.textContent = formatBytes(file.size);
-  filePreview.hidden = false;
-  document.getElementById("upload-icon").style.opacity = "0.4";
-  document.querySelector(".upload-title").style.opacity = "0.4";
-  document.querySelector(".upload-sub").style.opacity = "0.4";
-  document.querySelector(".upload-formats").style.opacity = "0.4";
-  document.getElementById("select-btn").hidden = true;
-}
-
-function clearFile() {
-  currentFile = null;
-  fileInput.value = "";
-  filePreview.hidden = true;
-  document.getElementById("upload-icon").style.opacity = "1";
-  document.querySelector(".upload-title").style.opacity = "1";
-  document.querySelector(".upload-sub").style.opacity = "1";
-  document.querySelector(".upload-formats").style.opacity = "1";
-  document.getElementById("select-btn").hidden = false;
-}
-
-fileInput.addEventListener("change", () => {
-  if (fileInput.files[0]) setFile(fileInput.files[0]);
-});
-
-removeBtn.addEventListener("click", (e) => {
-  e.stopPropagation();
-  clearFile();
-});
-
-// Drag & drop
-dropZone.addEventListener("dragover", (e) => {
-  e.preventDefault();
-  dropZone.classList.add("drag-over");
-});
-dropZone.addEventListener("dragleave", () => {
-  dropZone.classList.remove("drag-over");
-});
-dropZone.addEventListener("drop", (e) => {
-  e.preventDefault();
-  dropZone.classList.remove("drag-over");
-  const file = e.dataTransfer.files[0];
-  if (file) setFile(file);
-});
-dropZone.addEventListener("click", (e) => {
-  if (e.target === dropZone || e.target.closest(".upload-card") === dropZone) {
-    if (!currentFile) fileInput.click();
+// Prueba de entrada: nivel en tiempo real
+ivrSocket.on("input_test_level", ({ level }) => {
+  const bar = document.getElementById("input-level-bar");
+  const txt = document.getElementById("input-level-txt");
+  if (bar) bar.style.width = level + "%";
+  if (txt) {
+    const emoji = level > 60 ? "🔴" : level > 20 ? "🟡" : "🟢";
+    txt.textContent = emoji + " Nivel: " + level + "%";
   }
 });
-
-// ══════════════════════════════════════════════
-//  UI state helpers
-// ══════════════════════════════════════════════
-function showOnly(sectionId) {
-  ["progress-section","error-section","results-section"].forEach(id => {
-    document.getElementById(id).hidden = id !== sectionId;
-  });
-}
-
-function setStep(index) {
-  STEPS.forEach((id, i) => {
-    const el = document.getElementById(id);
-    el.classList.remove("active", "done");
-    if (i < index)  el.classList.add("done");
-    if (i === index) el.classList.add("active");
-  });
-  const labels = [
-    "Subiendo archivo…",
-    "Convirtiendo formato con ffmpeg…",
-    "Reduciendo ruido de fondo…",
-    "Amplificando señal débil…",
-    "Detectando tonos DTMF (Goertzel)…",
-    "Generando espectrograma…",
-  ];
-  progressLabel.textContent = labels[index] || "Procesando…";
-}
-
-// ══════════════════════════════════════════════
-//  Render results
-// ══════════════════════════════════════════════
-function renderResults(data) {
-  // Summary bar
-  document.getElementById("res-filename").textContent  = data.filename;
-  document.getElementById("res-duration").textContent  = `${data.duration_s} s`;
-  document.getElementById("res-count").textContent     = data.tones.length;
-  currentSequence = data.sequence;
-
-  // Sequence digits
-  seqDigitsEl.innerHTML = "";
-  if (data.sequence) {
-    [...data.sequence].forEach((ch, i) => {
-      const span = document.createElement("span");
-      span.className = "seq-digit";
-      span.textContent = ch;
-      const bg = DIGIT_COLORS[ch] || "#6366f1";
-      span.style.background = bg;
-      span.style.boxShadow = `0 4px 14px ${bg}66`;
-      span.style.animationDelay = `${i * 60}ms`;
-      seqDigitsEl.appendChild(span);
-    });
-  } else {
-    seqDigitsEl.innerHTML = `<span style="color:var(--text-muted);font-size:15px;">
-      No se detectaron tonos DTMF en este audio.</span>`;
-  }
-
-  // Sequence card visibility
-  document.getElementById("sequence-card").hidden = false;
-
-  // Chart
-  if (data.chart) {
-    chartImg.src = `data:image/png;base64,${data.chart}`;
-    chartImg.parentElement.hidden = false;
-  } else {
-    chartImg.parentElement.hidden = true;
-  }
-
-  // Table
-  tonesTbody.innerHTML = "";
-  data.tones.forEach((tone, i) => {
-    const bg = DIGIT_COLORS[tone.digit] || "#6366f1";
-    const freqs = DTMF_FREQS[tone.digit] || "—";
-    const tr = document.createElement("tr");
-    tr.innerHTML = `
-      <td style="color:var(--text-muted);font-family:var(--mono)">${i+1}</td>
-      <td>
-        <span class="digit-badge" style="background:${bg};box-shadow:0 2px 8px ${bg}66">
-          ${tone.digit}
-        </span>
-      </td>
-      <td style="font-family:var(--mono)">${tone.start_s}</td>
-      <td style="font-family:var(--mono)">${tone.end_s}</td>
-      <td style="font-family:var(--mono)">${tone.duration_ms} ms</td>
-      <td><span class="freq-tag">${freqs} Hz</span></td>
-    `;
-    tonesTbody.appendChild(tr);
-  });
-
-  showOnly("results-section");
-  resultsSec.classList.add("fade-in");
-  resultsSec.scrollIntoView({ behavior: "smooth", block: "start" });
-}
-
-// ══════════════════════════════════════════════
-//  Analyze
-// ══════════════════════════════════════════════
-async function runAnalysis() {
-  if (!currentFile) return;
-
-  // Show progress
-  showOnly("progress-section");
-  progressSec.classList.add("fade-in");
-  setStep(0);
-
-  // Simulate step progression while waiting for server
-  const stepTiming = [200, 600, 1800, 2800, 3600, 4200];
-  stepTiming.forEach((ms, i) => {
-    setTimeout(() => setStep(i), ms);
-  });
-
-  const formData = new FormData();
-  formData.append("audio", currentFile);
-
-  try {
-    const resp = await fetch("/analyze", {
-      method: "POST",
-      body: formData,
-    });
-
-    const data = await resp.json();
-
-    if (!resp.ok || data.error) {
-      throw new Error(data.error || `Error del servidor (${resp.status})`);
-    }
-
-    // All steps done
-    STEPS.forEach(id => {
-      const el = document.getElementById(id);
-      el.classList.remove("active");
-      el.classList.add("done");
-    });
-
-    setTimeout(() => renderResults(data), 400);
-
-  } catch (err) {
-    showOnly("error-section");
-    errorMsg.textContent = err.message || "Error desconocido al procesar el audio.";
-    errorSec.classList.add("fade-in");
-  }
-}
-
-analyzeBtn.addEventListener("click", (e) => {
-  e.stopPropagation();
-  runAnalysis();
+ivrSocket.on("input_test_done", ({ peak }) => {
+  const wrap = document.getElementById("input-level-wrap");
+  const bar  = document.getElementById("input-level-bar");
+  const txt  = document.getElementById("input-level-txt");
+  const btn  = document.getElementById("btn-test-input");
+  if (bar) bar.style.width = "0%";
+  if (txt) txt.textContent = peak > 0.001 ? "✅ Señal OK (pico: " + peak.toFixed(4) + ")" : "⚠️ Silencio detectado";
+  if (btn) { btn.disabled = false; btn.textContent = "🎤 Probar"; }
+  setTimeout(() => { if (wrap) wrap.style.display = "none"; }, 4000);
 });
 
-// ══════════════════════════════════════════════
-//  Copy sequence
-// ══════════════════════════════════════════════
-copyBtn.addEventListener("click", () => {
-  if (!currentSequence) return;
-  navigator.clipboard.writeText(currentSequence).then(() => {
-    copyBtn.classList.add("copied");
-    const orig = copyBtn.innerHTML;
-    copyBtn.innerHTML = `
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
-           stroke="currentColor" stroke-width="2">
-        <polyline points="20 6 9 17 4 12"/>
-      </svg>
-      ¡Copiado!`;
-    setTimeout(() => {
-      copyBtn.classList.remove("copied");
-      copyBtn.innerHTML = orig;
-    }, 2000);
-  });
-});
-
-// ══════════════════════════════════════════════
-//  Reset buttons
-// ══════════════════════════════════════════════
-function resetAll() {
-  showOnly(null);   // hide all sections
-  ["progress-section","error-section","results-section"].forEach(id => {
-    document.getElementById(id).hidden = true;
-  });
-  clearFile();
-  window.scrollTo({ top: 0, behavior: "smooth" });
+// ── Log ───────────────────────────────────────────────────────
+function addLog(msg, cls) {
+  const el = document.getElementById("ivr-log"); if (!el) return;
+  const d = document.createElement("div");
+  d.className = "log-line " + (cls || "info");
+  d.textContent = msg;
+  el.appendChild(d);
+  el.scrollTop = el.scrollHeight;
 }
 
-retryBtn.addEventListener("click", () => {
-  resetAll();
-});
+// ── Eventos servidor ──────────────────────────────────────────
+let ivrRunning = false;
 
-newBtn.addEventListener("click", () => {
-  resetAll();
-});
+function onIvrStatus({ processed, total, running }) {
+  const sp = document.getElementById("ivr-stat-processed");
+  const st = document.getElementById("ivr-stat-total");
+  const pb = document.getElementById("ivr-progress-bar");
+  if (sp) sp.textContent = processed;
+  if (st) st.textContent = total;
+  if (pb && total > 0) pb.style.width = ((processed / total) * 100) + "%";
+  if (running === false && ivrRunning) endCampaign();
+}
 
-// ══════════════════════════════════════════════
-//  MONITOR EN TIEMPO REAL
-// ══════════════════════════════════════════════
-(function initMonitor() {
-
-  // DOM refs
-  const monitorBtn    = document.getElementById("monitor-btn");
-  const monitorBtnLbl = monitorBtn.querySelector(".monitor-btn-label");
-  const monitorBtnIco = monitorBtn.querySelector(".monitor-btn-icon");
-  const statusDot     = document.getElementById("status-dot-rt");
-  const statusText    = document.getElementById("status-text-rt");
-  const rtDigitBg     = document.getElementById("rt-digit-bg");
-  const rtDigitVal    = document.getElementById("rt-digit-value");
-  const rtEnergyFill  = document.getElementById("rt-energy-fill");
-  const rtSeqDigits   = document.getElementById("rt-seq-digits");
-  const rtClearBtn    = document.getElementById("rt-clear-btn");
-
-  let socket          = null;
-  let audioCtx        = null;
-  let workletNode     = null;
-  let micStream       = null;
-  let isListening     = false;
-  let lastDigit       = null;
-  let lastDigitTimer  = null;
-  let rtSequence      = [];
-
-  // Colores por dígito (mismo mapa que el resto de la app)
-  function digitColor(d) { return DIGIT_COLORS[d] || "#6366f1"; }
-
-  // ── Actualizar UI con el dígito recibido ──────────────────────
-  function onDigit(digit, energy) {
-    // Barra de energía (log scale para mejor visual)
-    const logE = energy > 0 ? Math.min(1, Math.log10(energy / 1e-7) / 5) : 0;
-    rtEnergyFill.style.width = `${Math.max(0, Math.min(100, logE * 100)).toFixed(1)}%`;
-
-    if (!digit) {
-      // Sin tono activo
-      if (lastDigit) {
-        rtDigitBg.classList.remove("active");
-        // Apagar teclado después de un breve retraso
-        clearTimeout(lastDigitTimer);
-        lastDigitTimer = setTimeout(() => {
-          unlightAll();
-          if (rtDigitVal.textContent !== "—") rtDigitVal.textContent = "—";
-          lastDigit = null;
-        }, 300);
-      }
-      return;
-    }
-
-    // Nuevo dígito detectado
-    clearTimeout(lastDigitTimer);
-
-    // Actualizar display grande
-    if (digit !== lastDigit) {
-      rtDigitVal.textContent = digit;
-      rtDigitBg.classList.remove("active");
-      // Re-trigger animation
-      void rtDigitBg.offsetWidth;
-      rtDigitBg.classList.add("active");
-      rtDigitBg.style.borderColor = digitColor(digit);
-      rtDigitBg.style.boxShadow   = `0 0 28px ${digitColor(digit)}55`;
-
-      // Iluminar tecla del grid
-      unlightAll();
-      const keyId = `rtk-${digit === "*" ? "star" : digit === "#" ? "hash" : digit}`;
-      const keyEl = document.getElementById(keyId);
-      if (keyEl) {
-        keyEl.classList.add("lit");
-        keyEl.style.borderColor = digitColor(digit);
-        keyEl.style.background  = `${digitColor(digit)}33`;
-        keyEl.style.boxShadow   = `0 0 16px ${digitColor(digit)}66`;
-      }
-
-      // Agregar a la secuencia si no es repetición
-      if (rtSequence.length === 0 || rtSequence[rtSequence.length - 1] !== digit) {
-        rtSequence.push(digit);
-        addSeqDigit(digit);
-      }
-
-      lastDigit = digit;
+function onCallUpdate({ number, status }) {
+  const cn = document.getElementById("ivr-call-number");
+  const cc = document.getElementById("ivr-current-call");
+  const cs = document.getElementById("ivr-campaign-status");
+  if (cn) cn.textContent = number || "";
+  if (cc) cc.hidden = !number;
+  if (cs) cs.textContent = status || "";
+  if (number) {
+    const pill = document.getElementById("ivr-pill-" + number);
+    if (pill) {
+      const cls = { CALLING:"p-call", ACTIVE:"p-act", ANSWERED_TONE:"p-ok",
+                    ANSWERED_NO_TONE:"p-warn", NO_ANSWER:"p-warn", ERROR:"p-err" };
+      pill.className = "pill " + (cls[status] || "p-pend");
+      pill.textContent = status;
     }
   }
+}
 
-  function unlightAll() {
-    document.querySelectorAll(".rt-key.lit").forEach(k => {
-      k.classList.remove("lit");
-      k.style.borderColor = "";
-      k.style.background  = "";
-      k.style.boxShadow   = "";
-    });
-  }
+function onIvrDigit({ number, digit, option }) {
+  addLog("🎯 " + number + " → Tono " + digit + ": " + option, "ok");
+  const el = document.getElementById("ivr-digit-" + number);
+  if (el) el.innerHTML = '<span class="pill p-ok">' + digit + '</span>';
+}
 
-  function addSeqDigit(digit) {
-    const span = document.createElement("span");
-    span.className = "rt-seq-digit";
-    span.textContent = digit;
-    const bg = digitColor(digit);
-    span.style.background = bg;
-    span.style.boxShadow  = `0 4px 12px ${bg}66`;
-    rtSeqDigits.appendChild(span);
-    rtSeqDigits.scrollTop = rtSeqDigits.scrollHeight;
-  }
+function endCampaign() {
+  ivrRunning = false;
+  const lb = document.getElementById("ivr-launch-btn"); if (lb) lb.disabled = false;
+  const sb = document.getElementById("ivr-stop-btn");   if (sb) sb.disabled = true;
+  const cs = document.getElementById("ivr-campaign-status"); if (cs) cs.textContent = "Finalizada";
+  const dl = document.getElementById("ivr-download-btn");    if (dl) dl.style.display = "inline-flex";
+  addLog("✅ Campaña finalizada", "ok");
+}
 
-  function setStatus(state, msg) {
-    statusDot.className  = `status-dot-rt ${state}`;
-    statusText.textContent = msg;
-  }
+// ── Init ──────────────────────────────────────────────────────
+(function init() {
+  const E = id => document.getElementById(id);
 
-  // ── Iniciar captura ──────────────────────────────────────────
-  async function startMonitor() {
+  // ── Dispositivos de audio (Python los enumera) ──
+  async function loadAudioDevices() {
     try {
-      setStatus("", "Solicitando acceso al micrófono…");
-
-      micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-
-      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      const nativeSR = audioCtx.sampleRate;
-
-      // Registrar el AudioWorklet
-      await audioCtx.audioWorklet.addModule("/static/dtmf_processor.js");
-
-      const micSource = audioCtx.createMediaStreamSource(micStream);
-      workletNode = new AudioWorkletNode(audioCtx, "dtmf-processor", {
-        processorOptions: { chunkSize: Math.floor(nativeSR * 0.04) }  // 40ms chunks
-      });
-
-      // Recibir chunks del worklet → enviar por Socket.IO
-      workletNode.port.onmessage = (ev) => {
-        if (!socket || !socket.connected) return;
-        socket.emit("audio_chunk", { pcm: ev.data.pcm, sr: nativeSR });
-      };
-
-      micSource.connect(workletNode);
-      workletNode.connect(audioCtx.destination);  // necesario para que el worklet corra
-
-      // Conectar Socket.IO
-      socket = io("http://localhost:5050", { transports: ["websocket"] });
-
-      socket.on("connect", () => {
-        socket.emit("rt_config", { sampleRate: nativeSR });
-        isListening = true;
-        setStatus("listening", `Escuchando — ${nativeSR} Hz → 8 kHz (Goertzel activo)`);
-        monitorBtn.classList.add("active");
-        monitorBtnLbl.textContent = "Detener monitor";
-        monitorBtnIco.textContent = "■";
-      });
-
-      socket.on("disconnect", () => {
-        setStatus("", "Desconectado del servidor");
-      });
-
-      socket.on("rt_digit", (data) => {
-        onDigit(data.digit, data.energy);
-      });
-
-      socket.on("connect_error", (err) => {
-        setStatus("error", `Error de conexión: ${err.message}`);
-      });
-
-    } catch (err) {
-      setStatus("error", `Error: ${err.message || err}`);
-      stopMonitor();
-    }
-  }
-
-  // ── Detener captura ──────────────────────────────────────────
-  function stopMonitor() {
-    isListening = false;
-
-    if (workletNode) { workletNode.disconnect(); workletNode = null; }
-    if (audioCtx)    { audioCtx.close(); audioCtx = null; }
-    if (micStream)   { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
-    if (socket)      { socket.disconnect(); socket = null; }
-
-    unlightAll();
-    rtDigitBg.classList.remove("active");
-    rtDigitBg.style.borderColor = "";
-    rtDigitBg.style.boxShadow   = "";
-    rtDigitVal.textContent = "—";
-    rtEnergyFill.style.width = "0%";
-    lastDigit = null;
-
-    monitorBtn.classList.remove("active");
-    monitorBtnLbl.textContent = "Iniciar monitor";
-    monitorBtnIco.textContent = "▶";
-    setStatus("", "Inactivo — presiona \"Iniciar monitor\" para comenzar");
-  }
-
-  // ── Toggle ───────────────────────────────────────────────────
-  monitorBtn.addEventListener("click", () => {
-    if (isListening) {
-      stopMonitor();
-    } else {
-      startMonitor();
-    }
-  });
-
-  // Limpiar secuencia
-  rtClearBtn.addEventListener("click", () => {
-    rtSequence = [];
-    rtSeqDigits.innerHTML = "";
-  });
-
-})();
-
-// ══════════════════════════════════════════════
-//  SISTEMA DE TABS
-// ══════════════════════════════════════════════
-(function initTabs() {
-  // Secciones controladas por tabs
-  // analyzer → hero + upload + progress + error + results
-  // monitor  → monitor-section  (id="monitor")
-  // ivr      → ivr-section
-  const TAB_SECTIONS = {
-    analyzer: ["hero", "upload-section", "progress-section", "error-section", "results-section"],
-    monitor:  ["monitor"],
-    ivr:      ["ivr-section"],
-  };
-
-  const tabs = document.querySelectorAll(".header-tab");
-
-  function switchTab(tabName) {
-    // Ocultar todas las secciones de todos los tabs
-    Object.values(TAB_SECTIONS).flat().forEach(id => {
-      const el = document.getElementById(id);
-      if (el) el.hidden = true;
-    });
-
-    // Mostrar secciones del tab activo
-    (TAB_SECTIONS[tabName] || []).forEach(id => {
-      const el = document.getElementById(id);
-      if (el) el.hidden = false;
-    });
-
-    // Actualizar clases
-    tabs.forEach(t => t.classList.toggle("active", t.dataset.tab === tabName));
-
-    // Cuando se activa el IVR, recargar dispositivos
-    if (tabName === "ivr") {
-      ivrLoadDevices();
-    }
-  }
-
-  tabs.forEach(tab => {
-    tab.addEventListener("click", () => switchTab(tab.dataset.tab));
-  });
-
-  // Arrancar en tab "analyzer"
-  switchTab("analyzer");
-})();
-
-// ══════════════════════════════════════════════
-//  IVR AUTOMATOR MODULE
-// ══════════════════════════════════════════════
-(function initIVR() {
-  "use strict";
-
-  // ── Estado local ──────────────────────────────────────────────
-  let ivrNumbers      = [];       // lista cargada del Excel
-  let ivrAudioPaths   = {};       // { initial, middle, bye } → rutas en servidor
-  let ivrQueueRows    = {};       // número → <tr> en la tabla
-  let ivrSocket       = null;     // socket compartido (si el monitor ya lo abrió)
-  let ivrRunning      = false;
-
-  // ── DOM refs ─────────────────────────────────────────────────
-  const deviceSelect    = document.getElementById("ivr-device");
-  const refreshDevBtn   = document.getElementById("ivr-refresh-devices");
-  const excelInput      = document.getElementById("ivr-excel-input");
-  const excelName       = document.getElementById("ivr-excel-name");
-  const numbersBadge    = document.getElementById("ivr-numbers-badge");
-  const numbersCount    = document.getElementById("ivr-numbers-count");
-
-  const audioInitInput  = document.getElementById("ivr-audio-initial-input");
-  const audioInitName   = document.getElementById("ivr-audio-initial-name");
-  const audioMidInput   = document.getElementById("ivr-audio-middle-input");
-  const audioMidName    = document.getElementById("ivr-audio-middle-name");
-
-  const delayInput      = document.getElementById("ivr-delay");
-  const toneTimeoutInput= document.getElementById("ivr-tone-timeout");
-  const optionsList     = document.getElementById("ivr-options-list");
-  const addOptionBtn    = document.getElementById("ivr-add-option");
-
-  const testBtn         = document.getElementById("ivr-test-btn");
-  const launchBtn       = document.getElementById("ivr-launch-btn");
-  const stopBtn         = document.getElementById("ivr-stop-btn");
-
-  const progressBar     = document.getElementById("ivr-progress-bar");
-  const statProcessed   = document.getElementById("ivr-stat-processed");
-  const statTotal       = document.getElementById("ivr-stat-total");
-  const campaignStatus  = document.getElementById("ivr-campaign-status");
-  const currentCallDiv  = document.getElementById("ivr-current-call");
-  const callNumberEl    = document.getElementById("ivr-call-number");
-  const callBadgesEl    = document.getElementById("ivr-call-state-badges");
-  const downloadBtn     = document.getElementById("ivr-download-btn");
-
-  const queueTbody      = document.getElementById("ivr-queue-tbody");
-  const logEl           = document.getElementById("ivr-log");
-
-  const testModal       = document.getElementById("ivr-test-modal");
-  const testNumberInput = document.getElementById("ivr-test-number");
-  const testCancelBtn   = document.getElementById("ivr-test-cancel");
-  const testConfirmBtn  = document.getElementById("ivr-test-confirm");
-  const clearLogBtn     = document.getElementById("ivr-clear-log");
-
-  // ── Helpers ───────────────────────────────────────────────────
-
-  function ivrLog(msg, level = "info") {
-    const now = new Date();
-    const ts  = `${String(now.getHours()).padStart(2,"0")}:${String(now.getMinutes()).padStart(2,"0")}:${String(now.getSeconds()).padStart(2,"0")}`;
-    const div = document.createElement("div");
-    div.className = `ivr-log-entry lvl-${level}`;
-    div.innerHTML = `<span class="ivr-log-time">${ts}</span><span class="ivr-log-msg">${msg}</span>`;
-    logEl.appendChild(div);
-    logEl.scrollTop = logEl.scrollHeight;
-  }
-
-  function pillClass(status) {
-    const map = {
-      PENDING: "pill-pending", CALLING: "pill-calling",
-      ANSWERED_TONE: "pill-tone", ANSWERED_NO_TONE: "pill-answered",
-      NO_ANSWER: "pill-no-answer", DISCONNECTED: "pill-no-answer",
-      ADB_ERROR: "pill-error", ERROR: "pill-error", STOPPED: "pill-no-answer",
-    };
-    return map[status] || "pill-pending";
-  }
-
-  function pillLabel(status) {
-    const map = {
-      PENDING: "Pendiente", CALLING: "Marcando…",
-      ANSWERED_TONE: "Tono detectado", ANSWERED_NO_TONE: "Sin tono",
-      NO_ANSWER: "No contestó", DISCONNECTED: "Cortó",
-      ADB_ERROR: "Error ADB", ERROR: "Error", STOPPED: "Detenido",
-    };
-    return map[status] || status;
-  }
-
-  function buildIVROptions() {
-    const opts = {};
-    optionsList.querySelectorAll(".ivr-option-row").forEach(row => {
-      const digit = row.querySelector(".ivr-option-digit").value.trim();
-      const desc  = row.querySelector(".ivr-option-desc").value.trim();
-      const path  = row.dataset.audioByePath || null;
-      if (digit && desc) {
-        // Si tiene audio propio, enviar objeto; si no, string simple
-        opts[digit] = path ? { desc, audio_bye: path } : desc;
-      }
-    });
-    return opts;
-  }
-
-  function buildConfig(numbers) {
-    return {
-      numbers,
-      device_id:     deviceSelect.value || null,
-      delay_seconds: parseInt(delayInput.value) || 5,
-      tone_timeout:  parseInt(toneTimeoutInput.value) || 10,
-      audio_initial: ivrAudioPaths.initial || null,
-      audio_middle:  ivrAudioPaths.middle  || null,
-      audio_bye:     null,   // Se maneja por opción individual
-      ivr_options:   buildIVROptions(),
-    };
-  }
-
-  function validateConfig() {
-    if (!deviceSelect.value) {
-      ivrLog("⚠️ Selecciona un dispositivo ADB primero", "warn"); return false;
-    }
-    if (Object.keys(buildIVROptions()).length === 0) {
-      ivrLog("⚠️ Configura al menos una opción IVR (dígito → descripción)", "warn"); return false;
-    }
-    return true;
-  }
-
-  // ── Dispositivos ADB ─────────────────────────────────────────
-
-  async function ivrLoadDevices() {
-    deviceSelect.innerHTML = "<option value=''>Cargando...</option>";
-    try {
-      const r = await fetch("/ivr/devices");
-      // Verificar que la respuesta sea JSON
-      const ct = r.headers.get("content-type") || "";
-      if (!ct.includes("json")) {
-        ivrLog(`ERROR: El servidor no responde correctamente (HTTP ${r.status}). Reinicia el servidor.`, "error");
-        deviceSelect.innerHTML = "<option value=''>Reinicia el servidor</option>";
-        return;
-      }
+      const r = await fetch("/ivr/audio_devices");
       const d = await r.json();
-      deviceSelect.innerHTML = "<option value=''>-- Seleccionar dispositivo --</option>";
-      if (d.ok === false) {
-        ivrLog(`ERROR ADB: ${d.error}`, "error");
-        return;
-      }
-      if (d.devices && d.devices.length) {
-        d.devices.forEach(dev => {
-          const opt = document.createElement("option");
-          opt.value = dev;
-          opt.textContent = dev;
-          deviceSelect.appendChild(opt);
+
+      // Entradas (micrófono)
+      const selIn = E("ivr-audio-device");
+      if (selIn) {
+        const prevIn = selIn.value;
+        selIn.innerHTML = '<option value="">🖥️ Predeterminado del sistema</option>';
+        (d.inputs || []).forEach(dev => {
+          const o = document.createElement("option");
+          o.value = dev.index;
+          o.textContent = (dev.is_default ? "⭐ " : "") + dev.name + " (" + dev.samplerate + " Hz)";
+          selIn.appendChild(o);
         });
-        ivrLog(`${d.devices.length} dispositivo(s) detectado(s)`, "success");
-      } else {
-        ivrLog("Sin dispositivos ADB conectados", "warn");
+        if (prevIn) selIn.value = prevIn;
       }
-    } catch (e) {
-      deviceSelect.innerHTML = "<option value=''>Error ADB</option>";
-      ivrLog(`ERROR conectando ADB: ${e.message}. Asegurate de que el servidor este corriendo.`, "error");
-    }
+
+      // Salidas (altavoz / auriculares)
+      const selOut = E("ivr-output-device");
+      if (selOut) {
+        const prevOut = selOut.value;
+        selOut.innerHTML = '<option value="">🔊 Predeterminado del sistema</option>';
+        (d.outputs || []).forEach(dev => {
+          const o = document.createElement("option");
+          o.value = dev.index;
+          o.textContent = (dev.is_default ? "⭐ " : "") + dev.name + " (" + dev.samplerate + " Hz)";
+          selOut.appendChild(o);
+        });
+        if (prevOut) selOut.value = prevOut;
+      }
+
+      if (d.ok) {
+        const ni = (d.inputs || []).length, no = (d.outputs || []).length;
+        addLog("🎤 " + ni + " entrada(s) · 🔊 " + no + " salida(s) de audio detectadas", "ok");
+      } else {
+        addLog("⚠️ " + (d.error || "Error cargando dispositivos de audio"), "warn");
+      }
+    } catch(e) { addLog("❌ Error dispositivos audio: " + e.message, "err"); }
   }
 
-  refreshDevBtn.addEventListener("click", ivrLoadDevices);
+  E("ivr-refresh-audio")?.addEventListener("click", loadAudioDevices);
+  loadAudioDevices();
 
-  // ── Carga de Excel ───────────────────────────────────────────
+  // Cambio de dispositivo de entrada: detener monitor si estaba activo
+  E("ivr-audio-device")?.addEventListener("change", () => {
+    fetch("/ivr/monitor/stop", { method: "POST" });
+  });
 
-  excelInput.addEventListener("change", async () => {
-    const file = excelInput.files[0];
-    if (!file) return;
-    excelName.textContent = file.name;
-    ivrLog(`📂 Cargando Excel: ${file.name}…`);
+  // ── Prueba de ENTRADA (micrófono) ──
+  E("btn-test-input")?.addEventListener("click", async () => {
+    const btn  = E("btn-test-input");
+    const wrap = E("input-level-wrap");
+    const bar  = E("input-level-bar");
+    const txt  = E("input-level-txt");
+    const devIdx = E("ivr-audio-device")?.value;
+    const deviceIndex = (devIdx !== "" && devIdx != null) ? parseInt(devIdx) : null;
 
-    const fd = new FormData();
-    fd.append("file", file);
+    if (btn)  { btn.disabled = true; btn.textContent = "⏳ Capturando 3s..."; }
+    if (wrap) wrap.style.display = "block";
+    if (bar)  bar.style.width = "0%";
+    if (txt)  txt.textContent = "🎤 Habla cerca del micrófono...";
+    addLog("🎤 Iniciando prueba de entrada de audio (3 segundos)...", "info");
     try {
-      const r = await fetch("/ivr/upload_numbers", { method: "POST", body: fd });
-      const d = await r.json();
-      if (d.ok) {
-        ivrNumbers = d.numbers;
-        numbersCount.textContent = `${d.count} números cargados`;
-        numbersBadge.hidden = false;
-        ivrLog(`✅ ${d.count} números listos para marcar`, "success");
-        updateLaunchBtn();
-        buildQueueTable();
-      } else {
-        ivrLog(`❌ ${d.error}`, "error");
-      }
-    } catch (e) {
-      ivrLog(`❌ Error subiendo Excel: ${e.message}`, "error");
+      await fetch("/ivr/test_input", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ device_index: deviceIndex })
+      });
+    } catch(e) {
+      addLog("❌ Error: " + e.message, "err");
+      if (btn) { btn.disabled = false; btn.textContent = "🎤 Probar"; }
     }
   });
 
-  // ── Carga de audios ──────────────────────────────────────────
+  // ── Prueba de SALIDA (altavoz / auriculares) ──
+  E("btn-test-output")?.addEventListener("click", async () => {
+    const btn = E("btn-test-output");
+    const devIdx = E("ivr-output-device")?.value;
+    const deviceIndex = (devIdx !== "" && devIdx != null) ? parseInt(devIdx) : null;
 
-  async function uploadAudio(file, type, nameEl) {
-    nameEl.textContent = "Subiendo…";
-    const fd = new FormData();
-    fd.append("file", file);
-    fd.append("type", type);
+    if (btn) { btn.disabled = true; btn.textContent = "🔊 Reproduciendo..."; }
+    addLog("🔊 Reproduciendo pitido de prueba 1kHz (1 segundo)...", "info");
+    try {
+      await fetch("/ivr/test_output", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ device_index: deviceIndex })
+      });
+    } catch(e) { addLog("❌ Error: " + e.message, "err"); }
+    finally {
+      setTimeout(() => {
+        if (btn) { btn.disabled = false; btn.textContent = "🔊 Probar"; }
+      }, 1600);
+    }
+  });
+
+  // ── Dispositivos ADB ──
+  async function loadADB() {
+    try {
+      const r = await fetch("/ivr/devices"); const d = await r.json();
+      const sel = E("ivr-device"); if (!sel) return;
+      sel.innerHTML = '<option value="">— Seleccionar —</option>';
+      (d.devices || []).forEach(dev => {
+        const o = document.createElement("option"); o.value = dev; o.textContent = dev; sel.appendChild(o);
+      });
+      if (d.devices?.length) addLog("📱 " + d.devices.length + " dispositivo(s) ADB", "ok");
+      else addLog("⚠️ Sin dispositivos ADB conectados", "warn");
+    } catch(e) { addLog("❌ Error ADB: " + e.message, "err"); }
+  }
+  E("ivr-refresh-devices")?.addEventListener("click", loadADB);
+  loadADB();
+
+  // ── Excel ──
+  let ivrNumbers = [];
+  E("ivr-excel-input")?.addEventListener("change", e => {
+    const f = e.target.files[0]; if (!f) return;
+    const nm = E("ivr-excel-name"); if (nm) nm.textContent = f.name;
+    const reader = new FileReader();
+    reader.onload = ev => {
+      try {
+        const wb = XLSX.read(new Uint8Array(ev.target.result), { type: "array" });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        ivrNumbers = XLSX.utils.sheet_to_json(ws).map(r =>
+          String(r.Celular||r.celular||r.CELULAR||r.Numero||r.numero||r.NUMERO||Object.values(r)[0]||"")
+            .replace(/[\s\-\(\)]/g, "")).filter(Boolean);
+        const badge = E("ivr-numbers-badge"); if (badge) badge.hidden = false;
+        const cnt   = E("ivr-numbers-count"); if (cnt) cnt.textContent = ivrNumbers.length + " números";
+        addLog("📋 " + ivrNumbers.length + " números cargados de " + f.name, "ok");
+        buildQueue(ivrNumbers);
+        const lb = E("ivr-launch-btn"); if (lb) lb.disabled = false;
+      } catch(err) { addLog("❌ Error Excel: " + err.message, "err"); }
+    };
+    reader.readAsArrayBuffer(f);
+  });
+
+  // ── Audios ──
+  const audioPaths = { initial: null, middle: null };
+  async function uploadAudio(file, type) {
+    addLog("⏳ Subiendo audio " + type + "...", "info");
+    const fd = new FormData(); fd.append("file", file); fd.append("type", type);
     try {
       const r = await fetch("/ivr/upload_audio", { method: "POST", body: fd });
       const d = await r.json();
-      if (d.ok) {
-        ivrAudioPaths[type] = d.path;
-        nameEl.textContent = file.name;
-        ivrLog(`🎵 Audio ${type} cargado: ${file.name}`, "success");
-      } else {
-        nameEl.textContent = "Error";
-        ivrLog(`❌ Error: ${d.error}`, "error");
-      }
-    } catch (e) {
-      nameEl.textContent = "Error";
-      ivrLog(`❌ ${e.message}`, "error");
-    }
+      if (d.ok) { audioPaths[type] = d.path; addLog("✅ Audio " + type + " listo: " + file.name, "ok"); }
+      else addLog("❌ " + (d.error || "Error subiendo audio"), "err");
+    } catch(e) { addLog("❌ Red: " + e.message, "err"); }
   }
-
-  audioInitInput.addEventListener("change", () => {
-    if (audioInitInput.files[0]) uploadAudio(audioInitInput.files[0], "initial", audioInitName);
+  E("ivr-audio-initial-input")?.addEventListener("change", e => {
+    const f = e.target.files[0]; if (!f) return;
+    const nm = E("ivr-audio-initial-name"); if (nm) nm.textContent = f.name;
+    uploadAudio(f, "initial");
   });
-  audioMidInput.addEventListener("change", () => {
-    if (audioMidInput.files[0]) uploadAudio(audioMidInput.files[0], "middle", audioMidName);
+  E("ivr-audio-middle-input")?.addEventListener("change", e => {
+    const f = e.target.files[0]; if (!f) return;
+    const nm = E("ivr-audio-middle-name"); if (nm) nm.textContent = f.name;
+    uploadAudio(f, "middle");
   });
 
-  // ── Opciones IVR dinámicas ───────────────────────────────────
+  // ── Opciones IVR (con audio de despedida por opcion) ──
+  const optByePaths = {};   // { rowId: serverPath }
+  let optCounter = 0;
 
-  function addOptionRow(digit = "", desc = "") {
-    const row = document.createElement("div");
-    row.className = "ivr-option-row";
-    row.dataset.audioByePath = "";
-    const uid = `opt-audio-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  E("ivr-add-option")?.addEventListener("click", () => {
+    const list = E("ivr-options-list"); if (!list) return;
+    const rid  = "opt-" + (++optCounter);
+    const row  = document.createElement("div");
+    row.className = "opt-row"; row.dataset.rid = rid;
     row.innerHTML = `
-      <input class="ivr-input ivr-option-digit" type="text" maxlength="1"
-             placeholder="1" value="${digit}" title="Digito DTMF" />
-      <input class="ivr-input ivr-option-desc" type="text"
-             placeholder="Descripcion (ej: Interesado)" value="${desc}" />
-      <label class="btn btn-ghost btn-sm" for="${uid}" title="Audio de despedida para esta opcion" style="white-space:nowrap;flex-shrink:0">
-        <input type="file" id="${uid}" accept="audio/*,video/*" hidden />
-        <span class="ivr-opt-audio-name">+ Audio</span>
-      </label>
-      <button class="ivr-option-remove" title="Eliminar">&times;</button>
-    `;
-    const fileInput = row.querySelector(`#${uid}`);
-    const audioName = row.querySelector(".ivr-opt-audio-name");
-    fileInput.addEventListener("change", async () => {
-      const file = fileInput.files[0];
-      if (!file) return;
-      audioName.textContent = "Subiendo...";
-      const fd = new FormData();
-      fd.append("file", file);
-      fd.append("type", `opt_${digit || "x"}`);
+      <div class="opt-row-top">
+        <input type="text" class="finp opt-digit" placeholder="1" maxlength="1"
+               style="width:30px;text-align:center;flex-shrink:0">
+        <input type="text" class="finp opt-desc" placeholder="Descripcion" style="flex:1">
+        <button class="xbtn xr" style="padding:2px 8px">✕</button>
+      </div>
+      <div class="opt-row-bye">
+        <label>🎵 Despedida:</label>
+        <label class="xbtn xg" for="bye-${rid}" style="padding:2px 7px;font-size:10px">Elegir audio</label>
+        <input type="file" id="bye-${rid}" class="opt-bye-input" accept="audio/*,video/*" hidden>
+        <span class="fname opt-bye-name" style="max-width:160px">Global (predeterminada)</span>
+      </div>`;
+    row.querySelector("button").addEventListener("click", () => {
+      delete optByePaths[rid]; row.remove();
+    });
+    const fileInput = row.querySelector(".opt-bye-input");
+    fileInput.addEventListener("change", async e => {
+      const f = e.target.files[0]; if (!f) return;
+      const nm = row.querySelector(".opt-bye-name");
+      if (nm) nm.textContent = "⏳ " + f.name;
+      const fd = new FormData(); fd.append("file", f); fd.append("type", "bye_" + rid);
       try {
         const r = await fetch("/ivr/upload_audio", { method: "POST", body: fd });
         const d = await r.json();
         if (d.ok) {
-          row.dataset.audioByePath = d.path;
-          audioName.textContent = file.name.slice(0, 12) + (file.name.length > 12 ? "..." : "");
-          ivrLog(`Audio opcion '${digit}' cargado: ${file.name}`, "success");
-        } else {
-          audioName.textContent = "Error";
-          ivrLog(`Error: ${d.error}`, "error");
-        }
-      } catch (e) {
-        audioName.textContent = "Error";
+          optByePaths[rid] = d.path;
+          if (nm) nm.textContent = "✅ " + f.name;
+          addLog("✅ Audio despedida cargado para opción " + (row.querySelector(".opt-digit")?.value || "?"), "ok");
+        } else { if (nm) nm.textContent = "❌ Error"; }
+      } catch(ex) { if (row.querySelector(".opt-bye-name")) row.querySelector(".opt-bye-name").textContent = "❌ Red"; }
+    });
+    list.appendChild(row);
+  });
+
+  // ── Cola ──
+  function buildQueue(numbers) {
+    const tb = E("ivr-queue-tbody"); if (!tb) return;
+    tb.innerHTML = "";
+    numbers.forEach((num, i) => {
+      const tr = document.createElement("tr"); tr.id = "ivr-row-" + num;
+      tr.innerHTML = `<td>${i+1}</td><td>${num}</td>
+        <td><span class="pill p-pend" id="ivr-pill-${num}">Pendiente</span></td>
+        <td id="ivr-digit-${num}">—</td>`;
+      tb.appendChild(tr);
+    });
+  }
+
+  // ── Lanzar campaña ──
+  async function startCampaign(numbers, isTest) {
+    const devSel = E("ivr-device");
+    if (!devSel?.value) return addLog("⚠️ Selecciona un dispositivo ADB", "warn");
+    if (!numbers.length) return addLog("⚠️ Sin números en la lista", "warn");
+
+    // Dispositivos de audio
+    const inVal  = E("ivr-audio-device")?.value;
+    const outVal = E("ivr-output-device")?.value;
+    const audioInIndex  = (inVal  !== "" && inVal  != null) ? parseInt(inVal)  : null;
+    const audioOutIndex = (outVal !== "" && outVal != null) ? parseInt(outVal) : null;
+
+    const config = {
+      numbers,
+      device_id:           devSel.value,
+      audio_device:        audioInIndex,    // micrófono de entrada
+      audio_output_device: audioOutIndex,   // altavoz de salida
+      delay_seconds:  parseInt(E("ivr-delay")?.value) || 5,
+      tone_timeout:   parseInt(E("ivr-tone-timeout")?.value) || 10,
+      audio_initial:  audioPaths.initial,
+      audio_middle:   audioPaths.middle,
+      ivr_options:    {},
+      is_test:        isTest
+    };
+    E("ivr-options-list")?.querySelectorAll(".opt-row").forEach(r => {
+      const d  = r.querySelector(".opt-digit")?.value?.trim();
+      const de = r.querySelector(".opt-desc")?.value?.trim();
+      const rid = r.dataset.rid;
+      if (d && de) {
+        const byePath = rid && optByePaths[rid] ? optByePaths[rid] : null;
+        // Si tiene audio propio → objeto {desc, audio_bye}; si no → solo string
+        config.ivr_options[d] = byePath ? { desc: de, audio_bye: byePath } : de;
       }
     });
-    row.querySelector(".ivr-option-remove").addEventListener("click", () => row.remove());
-    optionsList.appendChild(row);
-  }
-
-  addOptionBtn.addEventListener("click", () => addOptionRow());
-  // Agregar una opción por defecto al cargar
-  addOptionRow("1", "Interesado");
-
-  // ── Cola visual ──────────────────────────────────────────────
-
-  function buildQueueTable() {
-    queueTbody.innerHTML = "";
-    ivrQueueRows = {};
-    ivrNumbers.forEach((num, i) => {
-      const tr = document.createElement("tr");
-      tr.id = `ivr-row-${num}`;
-      tr.innerHTML = `
-        <td style="color:var(--text-dim);font-family:var(--mono)">${i + 1}</td>
-        <td style="font-family:var(--mono);font-weight:600">${num}</td>
-        <td><span class="ivr-status-pill pill-pending" id="ivr-pill-${num}">Pendiente</span></td>
-        <td><span class="ivr-digit-result" id="ivr-digit-${num}">—</span></td>
-      `;
-      queueTbody.appendChild(tr);
-      ivrQueueRows[num] = tr;
-    });
-  }
-
-  function updateQueueRow(number, status, digit) {
-    const pill = document.getElementById(`ivr-pill-${number}`);
-    const digitEl = document.getElementById(`ivr-digit-${number}`);
-    const tr = document.getElementById(`ivr-row-${number}`);
-    if (pill) {
-      pill.className = `ivr-status-pill ${pillClass(status)}`;
-      pill.textContent = pillLabel(status);
-    }
-    if (digitEl && digit) {
-      const color = DIGIT_COLORS[digit] || "#6366f1";
-      digitEl.innerHTML = `<span style="background:${color};color:#fff;padding:2px 8px;border-radius:6px;font-weight:700;font-family:var(--mono)">${digit}</span>`;
-    }
-    if (tr) {
-      tr.className = status === "CALLING" ? "row-calling"
-                   : ["ADB_ERROR","ERROR"].includes(status) ? "row-error"
-                   : status !== "PENDING" ? "row-done" : "";
-    }
-  }
-
-  // ── Launch / Stop ────────────────────────────────────────────
-
-  function updateLaunchBtn() {
-    launchBtn.disabled = ivrNumbers.length === 0 || ivrRunning;
-  }
-
-  async function startCampaign(numbers, isTest = false) {
-    if (!validateConfig()) return;
-    const config = { ...buildConfig(numbers), is_test: isTest };
 
     ivrRunning = true;
-    updateLaunchBtn();
-    stopBtn.disabled = false;
-    campaignStatus.textContent = isTest ? "Prueba activa" : "En curso";
-    campaignStatus.style.color = "var(--green)";
-    currentCallDiv.hidden = false;
-    downloadBtn.style.display = "none";
-
-    connectIvrSocket();
+    const sb = E("ivr-stop-btn");  if (sb) sb.disabled = false;
+    const lb = E("ivr-launch-btn"); if (lb) lb.disabled = true;
+    addLog("🚀 Iniciando campaña con " + numbers.length + " número(s)...", "ok");
+    if (audioInIndex  !== null) addLog("🎤 Entrada: índice " + audioInIndex, "info");
+    if (audioOutIndex !== null) addLog("🔊 Salida:  índice " + audioOutIndex, "info");
 
     try {
       const r = await fetch("/ivr/start", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(config),
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(config)
       });
       const d = await r.json();
-      if (!d.ok) {
-        ivrLog(`❌ ${d.error}`, "error");
-        onCampaignEnd();
-      } else {
-        statTotal.textContent = d.total;
-        ivrLog(`🚀 ${d.msg}`, "success");
-      }
-    } catch (e) {
-      ivrLog(`❌ Error de red: ${e.message}`, "error");
-      onCampaignEnd();
-    }
+      if (d.ok) addLog("✅ " + d.msg, "ok");
+      else { addLog("❌ " + (d.error || "Error iniciando"), "err"); endCampaign(); }
+    } catch(e) { addLog("❌ Red: " + e.message, "err"); endCampaign(); }
   }
 
-  stopBtn.addEventListener("click", async () => {
-    try {
-      await fetch("/ivr/stop", { method: "POST" });
-      ivrLog("⏹ Campaña detenida por el usuario", "warn");
-    } catch (e) {
-      ivrLog(`❌ ${e.message}`, "error");
-    }
-  });
-
-  launchBtn.addEventListener("click", () => {
-    if (!validateConfig()) return;
-    if (ivrNumbers.length === 0) {
-      ivrLog("⚠️ Carga un Excel con números primero", "warn"); return;
-    }
-    statTotal.textContent = ivrNumbers.length;
-    statProcessed.textContent = "0";
-    progressBar.style.width = "0%";
-    buildQueueTable();
-    startCampaign(ivrNumbers, false);
-  });
-
-  // ── Prueba ───────────────────────────────────────────────────
-
-  testBtn.addEventListener("click", () => {
-    testNumberInput.value = "";
-    testModal.hidden = false;
-    setTimeout(() => testNumberInput.focus(), 50);
-  });
-  testCancelBtn.addEventListener("click", () => { testModal.hidden = true; });
-  testConfirmBtn.addEventListener("click", () => {
-    const num = testNumberInput.value.trim().replace(/\s|-/g, "");
-    if (!num) { ivrLog("⚠️ Ingresa un número válido", "warn"); return; }
-    testModal.hidden = true;
-    ivrNumbers = [num]; // temporal para la prueba
-    buildQueueTable();
-    statTotal.textContent = 1;
-    statProcessed.textContent = "0";
-    progressBar.style.width = "0%";
+  // ── Botones ──
+  E("ivr-test-btn")?.addEventListener("click", () => { E("ivr-test-modal").hidden = false; });
+  E("ivr-test-cancel")?.addEventListener("click", () => { E("ivr-test-modal").hidden = true; });
+  E("ivr-test-confirm")?.addEventListener("click", () => {
+    const num = E("ivr-test-number")?.value.trim(); if (!num) return;
+    E("ivr-test-modal").hidden = true;
     startCampaign([num], true);
   });
-  testModal.addEventListener("click", e => { if (e.target === testModal) testModal.hidden = true; });
-
-  // ── Socket.IO IVR ────────────────────────────────────────────
-
-  function connectIvrSocket() {
-    if (ivrSocket && ivrSocket.connected) return;
-    ivrSocket = io("http://localhost:5050", { transports: ["websocket"] });
-
-    ivrSocket.on("ivr_log", data => {
-      ivrLog(data.msg, data.level || "info");
-    });
-
-    ivrSocket.on("ivr_status", data => {
-      // Actualizar badge de estado de la llamada actual
-      const stateLabel = data.state;
-      const cls = stateLabel.toLowerCase();
-      callBadgesEl.innerHTML = `
-        <span class="ivr-state-badge ${cls}">
-          ${stateLabel === "ACTIVE" ? "✅" : stateLabel === "DISCONNECTED" ? "❌" : "🔄"}
-          ${stateLabel}
-        </span>`;
-    });
-
-    ivrSocket.on("ivr_call_update", data => {
-      const { number, status, digit, processed, total } = data;
-      if (number) callNumberEl.textContent = number;
-      if (processed !== undefined) {
-        statProcessed.textContent = processed;
-        const pct = total > 0 ? Math.round((processed / total) * 100) : 0;
-        progressBar.style.width = `${pct}%`;
-      }
-      if (status === "CALLING") {
-        callBadgesEl.innerHTML = `<span class="ivr-state-badge calling">📞 MARCANDO</span>`;
-      }
-      updateQueueRow(number, status, digit);
-    });
-
-    ivrSocket.on("ivr_digit", data => {
-      const { number, digit, option } = data;
-      ivrLog(`🎯 ${number} → opción ${digit}: ${option}`, "success");
-      updateQueueRow(number, "ANSWERED_TONE", digit);
-    });
-
-    ivrSocket.on("ivr_campaign_done", data => {
-      onCampaignEnd(data);
-    });
-  }
-
-  function onCampaignEnd(data) {
-    ivrRunning = false;
-    updateLaunchBtn();
-    stopBtn.disabled = true;
-    campaignStatus.textContent = "Completada";
-    campaignStatus.style.color = "var(--cyan)";
-    currentCallDiv.hidden = true;
-    downloadBtn.style.display = "";
-    if (data) {
-      ivrLog(`✅ Campaña terminada — ${data.processed}/${data.total} procesados`, "success");
-    }
-    if (ivrSocket) { ivrSocket.disconnect(); ivrSocket = null; }
-  }
-
-  clearLogBtn.addEventListener("click", () => { logEl.innerHTML = ""; });
-
-  // Log inicial
-  ivrLog("IVR Automator listo. Configura y lanza tu campaña.", "info");
-
+  E("ivr-launch-btn")?.addEventListener("click", () => startCampaign(ivrNumbers, false));
+  E("ivr-stop-btn")?.addEventListener("click", () => {
+    addLog("⏹ Deteniendo campaña...", "warn");
+    fetch("/ivr/stop", { method: "POST" });
+    fetch("/ivr/monitor/stop", { method: "POST" });
+  });
+  E("ivr-clear-log")?.addEventListener("click", () => {
+    const log = E("ivr-log"); if (log) log.innerHTML = "";
+  });
 })();

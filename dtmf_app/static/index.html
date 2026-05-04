@@ -3,504 +3,482 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>DTMF Analyzer — Detección de Tonos Telefónicos</title>
-  <meta name="description" content="Carga un audio y detecta los tonos DTMF (dígitos marcados) usando análisis espectral con el algoritmo de Goertzel." />
+  <title>IVR Automator — DTMF</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/static/style.css" />
+  <style>
+    /* === Layout IVR fijo — anula cualquier conflicto del CSS base === */
+    html, body { height: 100%; margin: 0; overflow: hidden; }
+
+    .ivr-root {
+      position: fixed;
+      top: 56px; left: 0; right: 0; bottom: 0;
+      display: flex;
+      flex-direction: row;
+      overflow: hidden;
+      background: #0f1729;
+    }
+
+    /* Header */
+    .ivr-hdr {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      height: 56px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 20px;
+      background: rgba(15,23,41,0.95);
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+      z-index: 100;
+      backdrop-filter: blur(12px);
+    }
+    .ivr-hdr-logo { font-weight: 800; font-size: 16px; color: #818cf8; letter-spacing: -0.02em; }
+    .ivr-hdr-logo span { color: #22d3ee; }
+    .ivr-hdr-status { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #94a3b8; }
+
+    /* Columna izquierda */
+    .ivr-left {
+      width: 280px;
+      flex-shrink: 0;
+      display: flex;
+      flex-direction: column;
+      border-right: 1px solid rgba(255,255,255,0.07);
+      background: rgba(255,255,255,0.02);
+      overflow: hidden;
+    }
+    .ivr-left-top {
+      flex-shrink: 0;
+      padding: 10px 14px;
+      border-bottom: 1px solid rgba(255,255,255,0.07);
+    }
+    .ivr-mic-row { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #94a3b8; margin-top: 4px; }
+    .ivr-scroll {
+      flex: 1;
+      overflow-y: auto;
+      padding: 10px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .ivr-footer {
+      flex-shrink: 0;
+      padding: 10px 12px;
+      border-top: 1px solid rgba(255,255,255,0.07);
+      display: flex;
+      gap: 6px;
+    }
+    .ivr-footer .xbtn { flex: 1; justify-content: center; }
+
+    /* Columna derecha */
+    .ivr-right {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* Barra de estado */
+    .ivr-statbar {
+      flex-shrink: 0;
+      height: 44px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 14px;
+      border-bottom: 1px solid rgba(255,255,255,0.07);
+      background: rgba(255,255,255,0.02);
+      font-size: 12px;
+    }
+    .sval { font-size: 20px; font-weight: 700; color: #818cf8; font-family: 'JetBrains Mono', monospace; }
+    .slbl { color: #64748b; font-size: 11px; }
+    .spbar { flex: 1; height: 5px; background: rgba(255,255,255,0.07); border-radius: 3px; overflow: hidden; }
+    .spbar-fill { height: 100%; background: linear-gradient(90deg,#6366f1,#06b6d4); width: 0%; transition: width .4s; }
+    .sstatus { font-weight: 600; color: #94a3b8; font-size: 12px; }
+
+    /* Cuerpo derecho */
+    .ivr-body {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* Panel cola */
+    .queue-panel {
+      flex: 0 0 140px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      border-bottom: 1px solid rgba(255,255,255,0.07);
+    }
+
+    /* Panel log */
+    .log-panel {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      background: #0a1020;
+    }
+
+    .panel-hdr {
+      flex-shrink: 0;
+      height: 30px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 12px;
+      font-size: 10px;
+      font-weight: 700;
+      color: #475569;
+      text-transform: uppercase;
+      letter-spacing: .07em;
+      border-bottom: 1px solid rgba(255,255,255,0.05);
+      background: rgba(255,255,255,0.015);
+    }
+
+    .queue-scroll {
+      flex: 1;
+      overflow-y: auto;
+      min-height: 0;
+    }
+    .queue-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .queue-table th { padding: 3px 10px; text-align: left; color: #475569; font-size: 10px; font-weight: 600; text-transform: uppercase; position: sticky; top:0; background: #0f1729; }
+    .queue-table td { padding: 4px 10px; border-bottom: 1px solid rgba(255,255,255,0.04); color: #e2e8f0; font-family: 'JetBrains Mono',monospace; font-size: 12px; }
+
+    /* LOG */
+    #ivr-log {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 8px 14px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+      line-height: 1.7;
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+      scrollbar-width: thin;
+      scrollbar-color: rgba(255,255,255,0.1) transparent;
+    }
+    .log-line { word-break: break-word; }
+    .log-line.ok   { color: #4ade80; }
+    .log-line.err  { color: #f87171; }
+    .log-line.warn { color: #fbbf24; }
+    .log-line.info { color: #94a3b8; }
+    .log-line.dbg  { color: #475569; }
+
+    /* Campos */
+    .fld { display: flex; flex-direction: column; gap: 4px; }
+    .flbl { font-size: 10px; font-weight: 700; color: #475569; text-transform: uppercase; letter-spacing: .06em; }
+    .frow { display: flex; align-items: center; gap: 6px; }
+    .fname { font-size: 11px; color: #64748b; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 130px; }
+    .fsel, .finp {
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 6px;
+      color: #e2e8f0;
+      font-size: 12px;
+      padding: 5px 8px;
+      font-family: Inter, sans-serif;
+    }
+    /* Fondo oscuro para las opciones del desplegable */
+    .fsel option, select option {
+      background: #1e293b;
+      color: #e2e8f0;
+    }
+    .fsel { flex: 1; min-width: 0; }
+    .finp { width: 100%; }
+    .fbadge {
+      display: inline-block;
+      background: rgba(99,102,241,0.2);
+      color: #818cf8;
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: 600;
+      padding: 2px 6px;
+    }
+    .opt-list { display: flex; flex-direction: column; gap: 6px; max-height: 220px; overflow-y: auto; }
+    .opt-row  {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(255,255,255,0.07);
+      border-radius: 6px;
+      padding: 6px 8px;
+    }
+    .opt-row-top  { display: flex; gap: 5px; align-items: center; }
+    .opt-row-bye  { display: flex; gap: 5px; align-items: center; font-size: 10px; color: #64748b; }
+    .opt-row-bye label { white-space: nowrap; }
+
+    /* Botones */
+    .xbtn {
+      display: inline-flex; align-items: center; gap: 4px;
+      padding: 5px 10px;
+      border-radius: 6px;
+      font-size: 12px; font-weight: 500;
+      border: none; cursor: pointer;
+      font-family: Inter, sans-serif;
+      white-space: nowrap;
+      transition: opacity .15s;
+    }
+    .xg  { background: rgba(255,255,255,0.07); color: #e2e8f0; border: 1px solid rgba(255,255,255,0.1); }
+    .xg:hover  { background: rgba(255,255,255,0.13); }
+    .xp  { background: linear-gradient(135deg,#6366f1,#4f46e5); color:#fff; }
+    .xp:hover  { opacity:.88; }
+    .xp:disabled { opacity:.35; cursor:not-allowed; }
+    .xr  { background: rgba(239,68,68,0.15); color:#f87171; border:1px solid rgba(239,68,68,0.25); }
+    .xr:hover  { background: rgba(239,68,68,0.25); }
+    .xr:disabled { opacity:.35; cursor:not-allowed; }
+    .xa  { background: rgba(6,182,212,0.15); color:#22d3ee; border:1px solid rgba(6,182,212,0.25); }
+
+    /* Pills */
+    .pill { display: inline-block; padding: 2px 7px; border-radius: 5px; font-size: 10px; font-weight: 700; text-transform: uppercase; }
+    .p-pend { background: rgba(255,255,255,0.07); color:#94a3b8; }
+    .p-call { background: rgba(99,102,241,0.2);   color:#818cf8; }
+    .p-act  { background: rgba(6,182,212,0.2);    color:#22d3ee; }
+    .p-ok   { background: rgba(34,197,94,0.2);    color:#4ade80; }
+    .p-warn { background: rgba(245,158,11,0.15);  color:#fbbf24; }
+    .p-err  { background: rgba(239,68,68,0.15);   color:#f87171; }
+
+    /* Dot */
+    .dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: #374151; display: inline-block; flex-shrink: 0;
+    }
+    .dot.on  { background: #4ade80; box-shadow: 0 0 6px #4ade80; }
+    .dot.dim { background: #fbbf24; }
+    .dot.err { background: #f87171; }
+
+    /* Modal */
+    .modal-bg {
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,.75);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 9999;
+    }
+    .modal-bg[hidden] { display: none; }
+    .modal-box {
+      background: #1e293b;
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 14px;
+      padding: 24px;
+      min-width: 320px; max-width: 420px; width: 90%;
+    }
+    .modal-box h3 { margin: 0 0 8px; font-size: 16px; color: #e2e8f0; }
+    .modal-box p  { color: #94a3b8; font-size: 13px; margin: 0; }
+    .modal-acts { display: flex; gap: 10px; justify-content: flex-end; margin-top: 14px; }
+
+    /* Logo text */
+    .logo-txt { font-weight: 800; font-size: 16px; }
+    .logo-txt .acc { color: #22d3ee; }
+
+    /* Scrollbars */
+    ::-webkit-scrollbar { width: 5px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 3px; }
+  </style>
 </head>
-<body>
+<body style="background:#0f1729;color:#e2e8f0;font-family:Inter,sans-serif;">
 
-<!-- ── Background particles ── -->
-<canvas id="bg-canvas"></canvas>
-
-<!-- ── Header ── -->
-<header class="header">
-  <div class="header-inner">
-    <div class="logo">
-      <div class="logo-icon">
-        <svg viewBox="0 0 36 36" fill="none">
-          <circle cx="18" cy="18" r="17" stroke="url(#lg1)" stroke-width="2"/>
-          <path d="M8 18 Q18 6 28 18 Q18 30 8 18Z" fill="url(#lg2)" opacity="0.8"/>
-          <circle cx="18" cy="18" r="4" fill="#fff"/>
-          <defs>
-            <linearGradient id="lg1" x1="0" y1="0" x2="36" y2="36">
-              <stop stop-color="#6366f1"/><stop offset="1" stop-color="#06b6d4"/>
-            </linearGradient>
-            <linearGradient id="lg2" x1="0" y1="0" x2="36" y2="36">
-              <stop stop-color="#6366f1"/><stop offset="1" stop-color="#06b6d4"/>
-            </linearGradient>
-          </defs>
-        </svg>
-      </div>
-      <span class="logo-text">DTMF<span class="logo-accent">Analyzer</span></span>
-    </div>
-    <!-- Tab navigation -->
-    <nav class="header-tabs" id="header-tabs">
-      <button class="header-tab active" data-tab="analyzer" id="tab-analyzer">📊 Analizador</button>
-      <button class="header-tab" data-tab="monitor" id="tab-monitor">🎙️ Monitor</button>
-      <button class="header-tab" data-tab="ivr" id="tab-ivr">📞 IVR Automator</button>
-    </nav>
-    <div class="header-badge">
-      <span class="badge-dot"></span>
-      Servidor activo
-    </div>
+<!-- Header -->
+<div class="ivr-hdr">
+  <div class="logo-txt">IVR<span class="acc">Automator</span></div>
+  <div class="ivr-hdr-status">
+    <span class="dot on" id="srv-dot"></span>
+    <span>Servidor activo</span>
+    &nbsp;|&nbsp;
+    <span class="dot" id="mic-dot"></span>
+    <span id="mic-txt">Detector inactivo</span>
   </div>
-</header>
+</div>
 
-<!-- ── Main ── -->
-<main class="main">
+<!-- Contenedor principal -->
+<div class="ivr-root">
 
-  <!-- Hero -->
-  <section class="hero" id="hero">
-    <h1 class="hero-title">
-      Detección de Tonos
-      <span class="gradient-text">DTMF Telefónicos</span>
-    </h1>
-    <p class="hero-sub">
-      Carga cualquier grabación de audio y el sistema limpiará el ruido,
-      amplificará la señal y detectará cada número marcado por el usuario
-      usando el algoritmo de <strong>Goertzel</strong>.
-    </p>
+  <!-- ── COLUMNA IZQUIERDA ── -->
+  <div class="ivr-left">
 
-    <!-- DTMF reference grid -->
-    <div class="dtmf-ref">
-      <div class="dtmf-cell" style="--c:#6366f1">1<span>697+1209</span></div>
-      <div class="dtmf-cell" style="--c:#8b5cf6">2<span>697+1336</span></div>
-      <div class="dtmf-cell" style="--c:#a855f7">3<span>697+1477</span></div>
-      <div class="dtmf-cell" style="--c:#ec4899">4<span>770+1209</span></div>
-      <div class="dtmf-cell" style="--c:#f43f5e">5<span>770+1336</span></div>
-      <div class="dtmf-cell" style="--c:#ef4444">6<span>770+1477</span></div>
-      <div class="dtmf-cell" style="--c:#f97316">7<span>852+1209</span></div>
-      <div class="dtmf-cell" style="--c:#eab308">8<span>852+1336</span></div>
-      <div class="dtmf-cell" style="--c:#84cc16">9<span>852+1477</span></div>
-      <div class="dtmf-cell" style="--c:#22c55e">*<span>941+1209</span></div>
-      <div class="dtmf-cell" style="--c:#06b6d4">0<span>941+1336</span></div>
-      <div class="dtmf-cell" style="--c:#3b82f6">#<span>941+1477</span></div>
-    </div>
-  </section>
-
-  <!-- Upload card -->
-  <section class="upload-section" id="upload-section">
-    <div class="card upload-card" id="drop-zone">
-      <div class="upload-icon" id="upload-icon">
-        <svg viewBox="0 0 64 64" fill="none">
-          <circle cx="32" cy="32" r="30" stroke="url(#ulg)" stroke-width="2" stroke-dasharray="6 3"/>
-          <path d="M32 44V24M24 31l8-8 8 8" stroke="url(#ulg)" stroke-width="2.5"
-                stroke-linecap="round" stroke-linejoin="round"/>
-          <path d="M22 46h20" stroke="url(#ulg)" stroke-width="2.5" stroke-linecap="round"/>
-          <defs>
-            <linearGradient id="ulg" x1="0" y1="0" x2="64" y2="64">
-              <stop stop-color="#6366f1"/><stop offset="1" stop-color="#06b6d4"/>
-            </linearGradient>
-          </defs>
-        </svg>
-      </div>
-      <h2 class="upload-title">Arrastra tu archivo de audio aquí</h2>
-      <p class="upload-sub">o haz clic para seleccionarlo</p>
-      <p class="upload-formats">
-        WAV · MP3 · M4A · AAC · OGG · OPUS · FLAC · WMA · MP4 · WEBM · 3GP · AMR
-      </p>
-      <label class="btn btn-primary" for="file-input" id="select-btn">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-          <polyline points="17 8 12 3 7 8"/>
-          <line x1="12" y1="3" x2="12" y2="15"/>
-        </svg>
-        Seleccionar archivo
-      </label>
-      <input type="file" id="file-input" accept="audio/*,video/*,.m4a,.aac,.ogg,.opus,.flac,.wma,.amr,.3gp" hidden />
-
-      <!-- File preview -->
-      <div class="file-preview" id="file-preview" hidden>
-        <div class="file-info">
-          <div class="file-icon">🎵</div>
-          <div>
-            <div class="file-name" id="file-name"></div>
-            <div class="file-size" id="file-size"></div>
-          </div>
-          <button class="btn-remove" id="remove-btn" title="Quitar archivo">✕</button>
-        </div>
-        <button class="btn btn-primary btn-analyze" id="analyze-btn">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
-          </svg>
-          Analizar audio
-        </button>
-      </div>
-    </div>
-  </section>
-
-  <!-- Progress -->
-  <section class="progress-section" id="progress-section" hidden>
-    <div class="card progress-card">
-      <div class="progress-header">
-        <div class="spinner"></div>
-        <span class="progress-label" id="progress-label">Procesando audio…</span>
-      </div>
-      <div class="steps" id="steps">
-        <div class="step" id="step-upload">
-          <div class="step-dot"></div>
-          <span>Subiendo archivo</span>
-        </div>
-        <div class="step" id="step-convert">
-          <div class="step-dot"></div>
-          <span>Convirtiendo a WAV 8kHz</span>
-        </div>
-        <div class="step" id="step-noise">
-          <div class="step-dot"></div>
-          <span>Reduciendo ruido de fondo</span>
-        </div>
-        <div class="step" id="step-amplify">
-          <div class="step-dot"></div>
-          <span>Amplificando señal</span>
-        </div>
-        <div class="step" id="step-goertzel">
-          <div class="step-dot"></div>
-          <span>Aplicando algoritmo de Goertzel</span>
-        </div>
-        <div class="step" id="step-chart">
-          <div class="step-dot"></div>
-          <span>Generando espectrograma</span>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <!-- Error -->
-  <section class="error-section" id="error-section" hidden>
-    <div class="card error-card">
-      <div class="error-icon">⚠️</div>
-      <div class="error-msg" id="error-msg"></div>
-      <button class="btn btn-ghost" id="retry-btn">Intentar de nuevo</button>
-    </div>
-  </section>
-
-  <!-- Results -->
-  <section class="results-section" id="results-section" hidden>
-
-    <!-- Summary bar -->
-    <div class="results-summary" id="results-summary">
-      <div class="summary-item">
-        <div class="summary-label">Archivo</div>
-        <div class="summary-val" id="res-filename"></div>
-      </div>
-      <div class="summary-item">
-        <div class="summary-label">Duración</div>
-        <div class="summary-val" id="res-duration"></div>
-      </div>
-      <div class="summary-item">
-        <div class="summary-label">Tonos detectados</div>
-        <div class="summary-val" id="res-count"></div>
+    <div class="ivr-left-top">
+      <div style="font-weight:700;font-size:13px;color:#818cf8;margin-bottom:2px">Configuracion de Campana</div>
+      <div class="ivr-mic-row">
+        <span class="dot" id="mic-dot2"></span>
+        <span id="mic-txt2">Detector inactivo</span>
       </div>
     </div>
 
-    <!-- Sequence display -->
-    <div class="card sequence-card" id="sequence-card">
-      <div class="seq-label">Secuencia marcada</div>
-      <div class="seq-digits" id="seq-digits"></div>
-      <button class="btn btn-ghost copy-btn" id="copy-btn" title="Copiar">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
-             stroke="currentColor" stroke-width="2">
-          <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
-          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
-        </svg>
-        Copiar
-      </button>
+    <div class="ivr-scroll">
+
+      <!-- ADB -->
+      <div class="fld">
+        <label class="flbl">Dispositivo ADB</label>
+        <div class="frow">
+          <select class="fsel" id="ivr-device"><option value="">— Seleccionar —</option></select>
+          <button class="xbtn xg" id="ivr-refresh-devices" title="Refrescar">&#x1F504;</button>
+        </div>
+      </div>
+
+      <!-- Microfono -->
+      <div class="fld">
+        <label class="flbl">Microfono (entrada)</label>
+        <div class="frow">
+          <select class="fsel" id="ivr-audio-device"><option value="">&#x1F5A5; Predeterminado</option></select>
+          <button class="xbtn xg" id="ivr-refresh-audio" title="Refrescar">&#x1F504;</button>
+          <button class="xbtn xa" id="btn-test-input" style="padding:5px 8px" title="Probar 3s">&#x1F3A4; Probar</button>
+        </div>
+        <span class="flbl" style="text-transform:none;letter-spacing:0;color:#475569">Selecciona el mic que escucha el telefono</span>
+      </div>
+
+      <!-- Salida de audio (altavoz) -->
+      <div class="fld">
+        <label class="flbl">&#x1F508; Altavoz (salida)</label>
+        <div class="frow">
+          <select class="fsel" id="ivr-output-device"><option value="">&#x1F508; Predeterminado del sistema</option></select>
+          <button class="xbtn xa" id="btn-test-output" style="padding:5px 8px" title="Reproducir pitido">&#x1F508; Probar</button>
+        </div>
+        <span class="flbl" style="text-transform:none;letter-spacing:0;color:#475569">Donde se reproducen los audios IVR</span>
+      </div>
+
+      <!-- Excel -->
+      <div class="fld">
+        <label class="flbl">Lista de numeros</label>
+        <div class="frow">
+          <label class="xbtn xg" for="ivr-excel-input">&#x1F4C2; Excel</label>
+          <input type="file" id="ivr-excel-input" accept=".xlsx,.xls" hidden />
+          <span class="fname" id="ivr-excel-name">Sin archivo</span>
+        </div>
+        <span class="fbadge" id="ivr-numbers-badge" hidden><span id="ivr-numbers-count"></span></span>
+      </div>
+
+      <!-- Audio inicial -->
+      <div class="fld">
+        <label class="flbl">Audio inicial</label>
+        <div class="frow">
+          <label class="xbtn xg" for="ivr-audio-initial-input">&#x1F3B5;</label>
+          <input type="file" id="ivr-audio-initial-input" accept="audio/*,video/*" hidden />
+          <span class="fname" id="ivr-audio-initial-name">Sin archivo</span>
+        </div>
+      </div>
+
+      <!-- Audio intermedio -->
+      <div class="fld">
+        <label class="flbl">Audio intermedio</label>
+        <div class="frow">
+          <label class="xbtn xg" for="ivr-audio-middle-input">&#x1F3B5;</label>
+          <input type="file" id="ivr-audio-middle-input" accept="audio/*,video/*" hidden />
+          <span class="fname" id="ivr-audio-middle-name">Sin archivo</span>
+        </div>
+      </div>
+
+      <!-- Opciones IVR -->
+      <div class="fld">
+        <div class="frow" style="justify-content:space-between;margin-bottom:4px">
+          <label class="flbl">Opciones IVR</label>
+          <button class="xbtn xa" id="ivr-add-option" style="padding:3px 8px">+ Opcion</button>
+        </div>
+        <div class="opt-list" id="ivr-options-list"></div>
+      </div>
+
+      <!-- Tiempos -->
+      <div class="frow" style="gap:8px">
+        <div class="fld" style="flex:1">
+          <label class="flbl">Delay (s)</label>
+          <input class="finp" type="number" id="ivr-delay" value="5" min="1" max="300" />
+        </div>
+        <div class="fld" style="flex:1">
+          <label class="flbl">Espera tono (s)</label>
+          <input class="finp" type="number" id="ivr-tone-timeout" value="10" min="3" max="60" />
+        </div>
+      </div>
+
+    </div><!-- /scroll -->
+
+    <div class="ivr-footer">
+      <button class="xbtn xg xbtn" id="ivr-test-btn">&#x25B6; Probar</button>
+      <button class="xbtn xp xbtn" id="ivr-launch-btn" disabled>&#x1F680; Lanzar</button>
+      <button class="xbtn xr xbtn" id="ivr-stop-btn" disabled>&#x23F9; Detener</button>
     </div>
 
-    <!-- Chart -->
-    <div class="card chart-card">
-      <h3 class="card-title">Espectrograma y Forma de Onda</h3>
-      <img id="chart-img" class="chart-img" src="" alt="Espectrograma DTMF" />
-    </div>
+  </div><!-- /left -->
 
-    <!-- Tones table -->
-    <div class="card table-card">
-      <h3 class="card-title">Detalle de Tonos</h3>
-      <div class="table-wrap">
-        <table id="tones-table">
-          <thead>
-            <tr>
-              <th>#</th>
-              <th>Dígito</th>
-              <th>Inicio (s)</th>
-              <th>Fin (s)</th>
-              <th>Duración (ms)</th>
-              <th>Frecuencias</th>
-            </tr>
-          </thead>
-          <tbody id="tones-tbody"></tbody>
-        </table>
-      </div>
-    </div>
-
-    <!-- New analysis btn -->
-    <div class="action-row">
-      <button class="btn btn-primary" id="new-btn">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
-             stroke="currentColor" stroke-width="2">
-          <polyline points="1 4 1 10 7 10"/>
-          <path d="M3.51 15a9 9 0 1 0 .49-4.79"/>
-        </svg>
-        Nuevo análisis
-      </button>
-    </div>
-
-  </section>
-
-  <!-- ══ IVR AUTOMATOR ══ -->
-  <section class="ivr-section" id="ivr-section" hidden>
-
-    <!-- ── Panel de Configuración ── -->
-    <div class="ivr-grid">
-      <div class="card ivr-config-card">
-        <h2 class="ivr-panel-title">⚙️ Configuración de Campaña</h2>
-
-        <!-- Dispositivo ADB -->
-        <div class="ivr-field">
-          <label class="ivr-label" for="ivr-device">Dispositivo ADB</label>
-          <div class="ivr-row">
-            <select class="ivr-select" id="ivr-device">
-              <option value="">— Seleccionar dispositivo —</option>
-            </select>
-            <button class="btn btn-ghost btn-sm" id="ivr-refresh-devices" title="Actualizar dispositivos">
-              🔄
-            </button>
-          </div>
-        </div>
-
-        <!-- Excel con números -->
-        <div class="ivr-field">
-          <label class="ivr-label">Lista de números (Excel)</label>
-          <div class="ivr-file-row">
-            <label class="btn btn-ghost btn-sm" for="ivr-excel-input">📂 Cargar Excel</label>
-            <input type="file" id="ivr-excel-input" accept=".xlsx,.xls" hidden />
-            <span class="ivr-file-name" id="ivr-excel-name">Sin archivo</span>
-          </div>
-          <div class="ivr-badge-row" id="ivr-numbers-badge" hidden>
-            <span class="ivr-badge ivr-badge-blue" id="ivr-numbers-count"></span>
-          </div>
-        </div>
-
-        <!-- Audio inicial -->
-        <div class="ivr-field">
-          <label class="ivr-label">Audio inicial (mensaje principal)</label>
-          <div class="ivr-file-row">
-            <label class="btn btn-ghost btn-sm" for="ivr-audio-initial-input">🎵 Cargar audio</label>
-            <input type="file" id="ivr-audio-initial-input" accept="audio/*,video/*" hidden />
-            <span class="ivr-file-name" id="ivr-audio-initial-name">Sin archivo</span>
-          </div>
-        </div>
-
-        <!-- Audio intermedio -->
-        <div class="ivr-field">
-          <label class="ivr-label">Audio intermedio (si no hay tono)</label>
-          <div class="ivr-file-row">
-            <label class="btn btn-ghost btn-sm" for="ivr-audio-middle-input">🎵 Cargar audio</label>
-            <input type="file" id="ivr-audio-middle-input" accept="audio/*,video/*" hidden />
-            <span class="ivr-file-name" id="ivr-audio-middle-name">Sin archivo</span>
-          </div>
-        </div>
-
-        <!-- Opciones IVR -->
-        <div class="ivr-field">
-          <label class="ivr-label">Opciones IVR &mdash; dígito, descripción y audio de respuesta</label>
-          <p style="font-size:11px;color:var(--text-dim);margin-bottom:6px">Cada opción puede tener su propio audio de despedida (opcional, si no se carga se usa el global).</p>
-          <div class="ivr-options-list" id="ivr-options-list">
-            <!-- Se llena dinámicamente -->
-          </div>
-          <button class="btn btn-ghost btn-sm ivr-add-option" id="ivr-add-option">+ Agregar opción</button>
-        </div>
-
-        <!-- Delay entre llamadas -->
-        <div class="ivr-field">
-          <label class="ivr-label" for="ivr-delay">Segundos entre llamadas</label>
-          <input class="ivr-input" type="number" id="ivr-delay" value="5" min="1" max="300" />
-        </div>
-
-        <!-- Timeout espera de tono -->
-        <div class="ivr-field">
-          <label class="ivr-label" for="ivr-tone-timeout">Segundos de espera de tono</label>
-          <input class="ivr-input" type="number" id="ivr-tone-timeout" value="10" min="3" max="60" />
-        </div>
-
-        <!-- Acciones -->
-        <div class="ivr-actions">
-          <button class="btn btn-ghost" id="ivr-test-btn">
-            ▶ Probar sistema
-          </button>
-          <button class="btn btn-primary" id="ivr-launch-btn" disabled>
-            🚀 Lanzar campaña
-          </button>
-        </div>
-      </div>
-
-      <!-- ── Panel de Campaña ── -->
-      <div class="ivr-right-col">
-
-        <!-- Progreso -->
-        <div class="card ivr-progress-card" id="ivr-progress-card">
-          <div class="ivr-progress-header">
-            <h3 class="ivr-panel-title" style="margin:0">📊 Progreso</h3>
-            <button class="btn btn-ghost btn-sm" id="ivr-stop-btn" disabled>⏹ Detener</button>
-          </div>
-          <div class="ivr-progress-bar-wrap">
-            <div class="ivr-progress-bar" id="ivr-progress-bar" style="width:0%"></div>
-          </div>
-          <div class="ivr-progress-stats">
-            <span id="ivr-stat-processed">0</span> / <span id="ivr-stat-total">0</span> llamadas
-            &nbsp;|&nbsp; Estado: <span class="ivr-status-text" id="ivr-campaign-status">Inactivo</span>
-          </div>
-
-          <!-- Llamada actual -->
-          <div class="ivr-current-call" id="ivr-current-call" hidden>
-            <div class="ivr-call-number" id="ivr-call-number"></div>
-            <div class="ivr-call-state-badges" id="ivr-call-state-badges"></div>
-          </div>
-
-          <!-- Botón descargar resultados -->
-          <a class="btn btn-ghost btn-sm" id="ivr-download-btn" href="/ivr/results" download style="margin-top:10px;display:none">
-            ⬇️ Descargar resultados CSV
-          </a>
-        </div>
-
-        <!-- Cola de números -->
-        <div class="card ivr-queue-card">
-          <h3 class="ivr-panel-title">📋 Cola de llamadas</h3>
-          <div class="ivr-queue-table-wrap">
-            <table class="ivr-queue-table" id="ivr-queue-table">
-              <thead>
-                <tr>
-                  <th>#</th>
-                  <th>Número</th>
-                  <th>Estado</th>
-                  <th>Tono</th>
-                </tr>
-              </thead>
-              <tbody id="ivr-queue-tbody"></tbody>
-            </table>
-          </div>
-        </div>
-
-        <!-- Log de eventos -->
-        <div class="card ivr-log-card">
-          <div class="ivr-log-header">
-            <h3 class="ivr-panel-title" style="margin:0">🖥️ Log en tiempo real</h3>
-            <button class="btn btn-ghost btn-sm" id="ivr-clear-log">Limpiar</button>
-          </div>
-          <div class="ivr-log" id="ivr-log"></div>
-        </div>
-
-      </div><!-- /ivr-right-col -->
-    </div><!-- /ivr-grid -->
-
-    <!-- Modal prueba -->
-    <div class="ivr-modal-backdrop" id="ivr-test-modal" hidden>
-      <div class="ivr-modal">
-        <h3>▶ Prueba de sistema</h3>
-        <p>Ingresa el número al que se realizará la llamada de prueba:</p>
-        <input class="ivr-input" type="tel" id="ivr-test-number" placeholder="Ej: 3001234567" />
-        <div class="ivr-modal-actions">
-          <button class="btn btn-ghost" id="ivr-test-cancel">Cancelar</button>
-          <button class="btn btn-primary" id="ivr-test-confirm">Llamar</button>
-        </div>
-      </div>
-    </div>
-
-  </section>
-
-  <!-- ══ MONITOR EN TIEMPO REAL ══ -->
-  <section class="monitor-section" id="monitor" hidden>
-    <div class="monitor-header">
-      <div class="monitor-title-row">
-        <div class="monitor-icon">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-            <path d="M12 2a3 3 0 0 1 3 3v7a3 3 0 0 1-6 0V5a3 3 0 0 1 3-3z"/>
-            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
-            <line x1="12" y1="19" x2="12" y2="23"/>
-            <line x1="8"  y1="23" x2="16" y2="23"/>
-          </svg>
-        </div>
-        <div>
-          <h2 class="monitor-title">Monitor en Tiempo Real</h2>
-          <p class="monitor-sub">Detecta tonos DTMF desde tu micrófono al instante</p>
-        </div>
-      </div>
-      <button class="btn btn-monitor" id="monitor-btn">
-        <span class="monitor-btn-icon">▶</span>
-        <span class="monitor-btn-label">Iniciar monitor</span>
-      </button>
-    </div>
-
-    <!-- Visualizador principal -->
-    <div class="monitor-body">
-
-      <!-- Dígito en tiempo real (grande) -->
-      <div class="rt-digit-display">
-        <div class="rt-digit-bg" id="rt-digit-bg">
-          <div class="rt-digit-value" id="rt-digit-value">—</div>
-          <div class="rt-digit-label">Dígito detectado</div>
-        </div>
-        <div class="rt-energy-bar-wrap">
-          <div class="rt-energy-label">Nivel de señal</div>
-          <div class="rt-energy-track">
-            <div class="rt-energy-fill" id="rt-energy-fill"></div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Secuencia acumulada -->
-      <div class="rt-sequence-panel">
-        <div class="rt-seq-header">
-          <span class="rt-seq-label">Secuencia capturada</span>
-          <button class="btn btn-ghost btn-xs" id="rt-clear-btn">Limpiar</button>
-        </div>
-        <div class="rt-seq-digits" id="rt-seq-digits"></div>
-      </div>
-
-      <!-- Grid DTMF iluminado -->
-      <div class="rt-grid-wrap">
-        <div class="rt-grid-label">Teclado DTMF</div>
-        <div class="rt-dtmf-grid" id="rt-dtmf-grid">
-          <div class="rt-key" id="rtk-1"  data-digit="1">1</div>
-          <div class="rt-key" id="rtk-2"  data-digit="2">2</div>
-          <div class="rt-key" id="rtk-3"  data-digit="3">3</div>
-          <div class="rt-key" id="rtk-A"  data-digit="A">A</div>
-          <div class="rt-key" id="rtk-4"  data-digit="4">4</div>
-          <div class="rt-key" id="rtk-5"  data-digit="5">5</div>
-          <div class="rt-key" id="rtk-6"  data-digit="6">6</div>
-          <div class="rt-key" id="rtk-B"  data-digit="B">B</div>
-          <div class="rt-key" id="rtk-7"  data-digit="7">7</div>
-          <div class="rt-key" id="rtk-8"  data-digit="8">8</div>
-          <div class="rt-key" id="rtk-9"  data-digit="9">9</div>
-          <div class="rt-key" id="rtk-C"  data-digit="C">C</div>
-          <div class="rt-key" id="rtk-star" data-digit="*">*</div>
-          <div class="rt-key" id="rtk-0"  data-digit="0">0</div>
-          <div class="rt-key" id="rtk-hash" data-digit="#">#</div>
-          <div class="rt-key" id="rtk-D"  data-digit="D">D</div>
-        </div>
-      </div>
-
-    </div><!-- /monitor-body -->
+  <!-- ── COLUMNA DERECHA ── -->
+  <div class="ivr-right">
 
     <!-- Status bar -->
-    <div class="monitor-status-bar">
-      <span class="status-dot-rt" id="status-dot-rt"></span>
-      <span class="status-text-rt" id="status-text-rt">Inactivo — presiona "Iniciar monitor" para comenzar</span>
+    <div class="ivr-statbar">
+      <span class="sval" id="ivr-stat-processed">0</span>
+      <span class="slbl">/<span id="ivr-stat-total">0</span> llamadas</span>
+      <div class="spbar">
+        <div class="spbar-fill" id="ivr-progress-bar"></div>
+      </div>
+      <span class="sstatus" id="ivr-campaign-status">Inactivo</span>
+      <span id="ivr-current-call" hidden style="color:#22d3ee;font-weight:700">
+        &#x1F4DE; <span id="ivr-call-number"></span>
+      </span>
+      <a class="xbtn xg" id="ivr-download-btn" href="/ivr/results" download style="display:none">&#x2B07; CSV</a>
     </div>
 
-  </section>
+    <!-- Cuerpo -->
+    <div class="ivr-body">
 
-</main>
+      <!-- Cola -->
+      <div class="queue-panel">
+        <div class="panel-hdr">
+          <span>&#x1F4CB; Cola de llamadas</span>
+        </div>
+        <div class="queue-scroll">
+          <table class="queue-table" id="ivr-queue-table">
+            <thead><tr><th>#</th><th>Numero</th><th>Estado</th><th>Tono</th></tr></thead>
+            <tbody id="ivr-queue-tbody"></tbody>
+          </table>
+        </div>
+      </div>
 
-<!-- ── Footer ── -->
-<footer class="footer">
-  Pipeline: ffmpeg → Filtro paso de banda (300–3400 Hz) → Noise Reduce → Amplificación → Goertzel DTMF
-</footer>
+      <!-- Log -->
+      <div class="log-panel">
+        <div class="panel-hdr">
+          <span>&#x1F5A5; Log en tiempo real</span>
+          <button class="xbtn xg" id="ivr-clear-log" style="padding:2px 8px;font-size:11px">Limpiar</button>
+        </div>
+        <div id="ivr-log"></div>
+      </div>
+
+    </div><!-- /body -->
+
+  </div><!-- /right -->
+
+</div><!-- /root -->
+
+<!-- Modal prueba -->
+<div class="modal-bg" id="ivr-test-modal" hidden>
+  <div class="modal-box">
+    <h3>Prueba de sistema</h3>
+    <p>Numero de prueba:</p>
+    <input class="finp" type="tel" id="ivr-test-number" placeholder="Ej: 3001234567" style="width:100%;margin:10px 0;box-sizing:border-box" />
+    <div class="modal-acts">
+      <button class="xbtn xg" id="ivr-test-cancel">Cancelar</button>
+      <button class="xbtn xp" id="ivr-test-confirm">&#x1F4DE; Llamar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Elementos ocultos para compatibilidad JS -->
+<div style="display:none" aria-hidden="true">
+  <span id="status-dot-rt"></span><span id="status-text-rt"></span>
+  <button id="monitor-btn"><span class="monitor-btn-icon"></span><span class="monitor-btn-label"></span></button>
+  <div id="rt-digit-bg"><div id="rt-digit-value"></div></div>
+  <div id="rt-energy-fill"></div><div id="rt-seq-digits"></div><button id="rt-clear-btn"></button>
+</div>
 
 <script src="https://cdn.socket.io/4.8.1/socket.io.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

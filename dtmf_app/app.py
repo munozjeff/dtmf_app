@@ -49,6 +49,14 @@ except Exception as _e:
     _MONITOR_OK = False
     print(f"[WARN] CallMonitor no disponible: {_e}")
 
+# Audio del sistema (monitor DTMF en Python)
+try:
+    import sounddevice as sd
+    _SD_OK = True
+except Exception:
+    _SD_OK = False
+    print("[WARN] sounddevice no disponible")
+
 import numpy as np
 import soundfile as sf
 import noisereduce as nr
@@ -126,7 +134,7 @@ TOTAL_DOM_THRESHOLD = 0.82
 #   2 * (P_fila + P_col) / energia_frame  ~= 0.54 - 0.86  (medido en Grabacion7)
 # Para voz: energia distribuida en cientos de frecuencias -> concentracion < 0.10
 # No necesita suprimir la voz: mide la pureza espectral objetivamente.
-CONCENTRATION_THRESHOLD = 0.20   # conservador: cubre tonos con algo de ruido
+CONCENTRATION_THRESHOLD = 0.15   # Mas permisivo para captacion via microfono ambiente
 
 UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), "uploads")
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -260,7 +268,12 @@ def detect_dtmf_frame(samples: np.ndarray, sr: int, frame_energy: float):
     if concentration < CONCENTRATION_THRESHOLD:
         return None
 
-    return DTMF_MAP.get((br, bc))
+    digit = DTMF_MAP.get((br, bc))
+    if not digit and frame_energy > 1e-5:
+        # Log si hay mucha energia pero no mapea a DTMF
+        print(f"[DEBUG-DTMF] Energia alta ({frame_energy:.2e}) pero no es DTMF. Row:{br}({row_dom:.2f}) Col:{bc}({col_dom:.2f}) Conc:{concentration:.2f}")
+
+    return digit
 
 
 def analyze_dtmf(audio: np.ndarray, sr: int):
@@ -590,12 +603,20 @@ def on_audio_chunk(data):
         "energy": round(float(energy), 8),
     })
 
+    # Diagnostico: si la campaña esta activa, contar frames recibidos
+    if _ivr_dtmf_callback:
+        if not hasattr(on_audio_chunk, "_cnt"): on_audio_chunk._cnt = 0
+        on_audio_chunk._cnt += 1
+        if on_audio_chunk._cnt % 25 == 0: # aprox cada 1 seg (40ms * 25)
+            _emit_ivr("ivr_log", {"msg": f"  [DEBUG] Mic activo ({energy:.2e})", "level": "info"})
+
     # Si hay una campaña IVR activa y se detectó un dígito real → notificarla
     if digit and _ivr_dtmf_callback:
+        print(f"[IVR-RT] Digito '{digit}' detectado (E={energy:.2e}) -> enviando a campaña")
         try:
             _ivr_dtmf_callback(digit)
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"[IVR-RT] Error en callback: {exc}")
 
 
 # ══════════════════════════════════════════════
@@ -614,6 +635,9 @@ _ivr_lock = threading.Lock()
 # el monitor de micrófono se desvía aquí en lugar de sólo emitirse a la UI
 _ivr_dtmf_callback = None   # callable(digit) | None
 
+# Dispositivo de salida de audio seleccionado (nombre para pygame)
+_audio_output_device_name: str | None = None
+
 
 def _save_call_result(number: str, status: str, digit: str | None, notes: str = ""):
     """Guarda el resultado de una llamada en el CSV de resultados."""
@@ -629,16 +653,30 @@ def _save_call_result(number: str, status: str, digit: str | None, notes: str = 
 
 
 def _play_audio(path: str):
-    """Reproduce un archivo de audio en la PC via pygame."""
+    """Reproduce un archivo de audio usando pygame, con soporte de dispositivo de salida."""
     if not _PYGAME_OK or not path or not os.path.isfile(path):
         return
     try:
+        print(f"[IVR-Audio] Reproduciendo: {os.path.basename(path)}")
+        # Reinicializar mixer si hay dispositivo de salida específico
+        if _audio_output_device_name:
+            try:
+                if pygame.mixer.get_init():
+                    pygame.mixer.quit()
+                pygame.mixer.init(devicename=_audio_output_device_name)
+            except Exception as ex:
+                print(f"[IVR-Audio] No se pudo seleccionar salida '{_audio_output_device_name}': {ex}")
+                if not pygame.mixer.get_init():
+                    pygame.mixer.init()
+        elif not pygame.mixer.get_init():
+            pygame.mixer.init()
+
         pygame.mixer.music.load(path)
         pygame.mixer.music.play()
-        # Esperar a que termine (máx 60 s)
         start = time.time()
         while pygame.mixer.music.get_busy() and (time.time() - start) < 60:
             time.sleep(0.1)
+        print(f"[IVR-Audio] Fin reproduccion: {os.path.basename(path)}")
     except Exception as exc:
         print(f"[IVR] Error reproduciendo audio: {exc}")
 
@@ -702,6 +740,7 @@ class IVRCampaign(threading.Thread):
 
     def on_dtmf(self, digit: str):
         """Llamado por el handler WebSocket cuando llega un dígito DTMF."""
+        print(f"[IVRCampaign] Digito recibido en campaña: {digit}")
         self._last_digit = digit
         self._digit_event.set()
 
@@ -811,26 +850,59 @@ class IVRCampaign(threading.Thread):
     def _handle_active(self, number: str) -> tuple[str, str | None]:
         """
         La llamada fue contestada (ACTIVE).
-        Reproduce audio inicial, espera tono, actua.
+        Reproduce audio inicial, espera tono válido, actúa.
+        Tonos no configurados se ignoran y se sigue esperando.
         Retorna (status, digit_detectado)
         """
-        _emit_ivr("ivr_log", {"msg": "  Llamada contestada - reproduciendo audio inicial", "level": "success"})
+        _emit_ivr("ivr_log", {"msg": "  Llamada contestada — activando monitor de audio...", "level": "success"})
+        start_audio_monitor(_audio_monitor_device)
 
+        self._digit_event.clear()
+        self._last_digit = None
+
+        _emit_ivr("ivr_log", {"msg": "  Reproduciendo audio inicial", "level": "info"})
         _play_audio(self.audio_initial)
         if self._stop_event.is_set():
+            stop_audio_monitor()
             return "STOPPED", None
 
+        # Barge-in: si ya se detectó algo durante el audio, notificar pero
+        # solo cuenta si es un tono válido (se evalúa abajo)
+        if self._digit_event.is_set():
+            _emit_ivr("ivr_log", {"msg": "  (Señal detectada durante el audio — evaluando...)", "level": "info"})
+
         for attempt in range(2):
-            self._digit_event.clear()
-            self._last_digit = None
-            _emit_ivr("ivr_log", {"msg": f"  Esperando tono ({self.tone_timeout}s)...", "level": "info"})
-            self._digit_event.wait(timeout=self.tone_timeout)
+            deadline = time.time() + self.tone_timeout
+            _emit_ivr("ivr_log", {"msg": f"  Esperando tono válido ({self.tone_timeout}s)...", "level": "info"})
 
-            if self._stop_event.is_set():
-                return "STOPPED", None
+            digit = None
+            while time.time() < deadline:
+                if self._stop_event.is_set():
+                    stop_audio_monitor()
+                    return "STOPPED", None
 
-            digit = self._last_digit
-            if digit and digit in self.ivr_options:
+                # Esperar el próximo evento con el tiempo restante
+                remaining = max(0.1, deadline - time.time())
+                self._digit_event.wait(timeout=remaining)
+                self._digit_event.clear()
+
+                candidate = self._last_digit
+                self._last_digit = None
+
+                if not candidate:
+                    continue   # silencio o ruido
+
+                if candidate in self.ivr_options:
+                    digit = candidate
+                    break      # tono válido encontrado
+                else:
+                    # Ignorar y seguir esperando
+                    _emit_ivr("ivr_log", {
+                        "msg": f"  Tono '{candidate}' no configurado — ignorando",
+                        "level": "info"
+                    })
+
+            if digit:
                 option_data = self.ivr_options[digit]
                 if isinstance(option_data, dict):
                     desc      = option_data.get("desc", digit)
@@ -839,21 +911,25 @@ class IVRCampaign(threading.Thread):
                     desc      = str(option_data)
                     audio_bye = self.audio_bye
 
-                _emit_ivr("ivr_log", {"msg": f"  Tono detectado: {digit} - {desc}", "level": "success"})
+                _emit_ivr("ivr_log", {"msg": f"  ✅ Tono válido: {digit} — {desc}", "level": "success"})
                 _emit_ivr("ivr_digit", {"number": number, "digit": digit, "option": desc})
                 _play_audio(audio_bye)
                 self._hang_up()
+                stop_audio_monitor()
                 return "ANSWERED_TONE", digit
 
-            elif digit:
-                _emit_ivr("ivr_log", {"msg": f"  Tono {digit} no configurado - ignorando", "level": "warn"})
-
+            # Timeout sin tono válido
             if attempt == 0 and self.audio_middle:
-                _emit_ivr("ivr_log", {"msg": "  Reproduciendo mensaje intermedio", "level": "info"})
+                _emit_ivr("ivr_log", {"msg": "  Sin respuesta — reproduciendo mensaje intermedio", "level": "info"})
                 _play_audio(self.audio_middle)
+                if self._stop_event.is_set():
+                    stop_audio_monitor()
+                    return "STOPPED", None
+
 
         _emit_ivr("ivr_log", {"msg": "  Sin tono valido - colgando", "level": "warn"})
         self._hang_up()
+        stop_audio_monitor()
         return "ANSWERED_NO_TONE", None
 
     # ── Helpers ADB ──────────────────────────────────────────────
@@ -875,6 +951,257 @@ class IVRCampaign(threading.Thread):
         deadline = time.time() + seconds
         while time.time() < deadline and not self._stop_event.is_set():
             time.sleep(0.2)
+
+
+# ══════════════════════════════════════════════
+#  MONITOR DE AUDIO EN PYTHON (sounddevice)
+# ══════════════════════════════════════════════
+
+_audio_monitor_thread: "PythonAudioMonitor | None" = None
+_audio_monitor_device = None   # índice del dispositivo seleccionado
+
+class PythonAudioMonitor(threading.Thread):
+    """
+    Captura audio directamente del dispositivo de entrada del sistema
+    y ejecuta detección DTMF Goertzel en tiempo real.
+    No depende del navegador ni de mediaDevices.
+    """
+    WINDOW = int(TARGET_SR * 0.08)   # 640 muestras @ 8 kHz
+    HOP    = int(TARGET_SR * 0.02)   # 160 muestras
+
+    def __init__(self, device_index=None):
+        super().__init__(daemon=True, name="PythonAudioMonitor")
+        self.device_index = device_index
+        self._stop_ev = threading.Event()
+        self._buf: list[float] = []
+        self._last_digit: str | None = None
+        self._last_emit = 0.0
+
+    def run(self):
+        if not _SD_OK:
+            _emit_ivr("ivr_log", {"msg": "❌ sounddevice no instalado", "level": "error"})
+            return
+        try:
+            dev_info = sd.query_devices(self.device_index, "input")
+            sr_native = int(dev_info["default_samplerate"])
+            dev_name  = dev_info["name"]
+        except Exception as exc:
+            _emit_ivr("ivr_log", {"msg": f"❌ Dispositivo audio inválido: {exc}", "level": "error"})
+            return
+
+        _emit_ivr("ivr_log", {
+            "msg": f"🎤 Monitor activo: [{dev_name}] @ {sr_native} Hz",
+            "level": "success"
+        })
+
+        def callback(indata, frames, time_info, status):
+            if self._stop_ev.is_set():
+                raise sd.CallbackStop()
+
+            chunk = indata[:, 0].astype(np.float32)
+
+            # Resamplear a 8 kHz si es necesario
+            if sr_native != TARGET_SR:
+                g = gcd(TARGET_SR, sr_native)
+                chunk = resample_poly(chunk, TARGET_SR // g, sr_native // g).astype(np.float32)
+
+            self._buf.extend(chunk.tolist())
+            if len(self._buf) < self.WINDOW:
+                return
+
+            frame  = np.array(self._buf[-self.WINDOW:], dtype=np.float32)
+            sos    = _get_bandpass(TARGET_SR)
+            frame  = sosfilt(sos, frame).astype(np.float32)
+            energy = float(np.mean(frame ** 2))
+
+            if energy < ENERGY_THRESHOLD:
+                self._last_digit = None
+                if len(self._buf) > self.WINDOW * 4:
+                    self._buf = self._buf[-self.WINDOW:]
+                return
+
+            digit = detect_dtmf_frame(frame, TARGET_SR, energy)
+
+            # Emitir estado a la UI
+            now = time.time()
+            if now - self._last_emit > 0.08:
+                self._last_emit = now
+                socketio.emit("rt_digit", {"digit": digit, "energy": round(float(energy), 8)})
+
+            # Notificar al IVR cuando hay dígito nuevo
+            if digit and digit != self._last_digit:
+                self._last_digit = digit
+                print(f"[AudioMonitor] Dígito: {digit}  E={energy:.2e}")
+                _emit_ivr("ivr_log", {"msg": f"  🎯 Tono detectado: {digit}", "level": "success"})
+                if _ivr_dtmf_callback:
+                    try:
+                        _ivr_dtmf_callback(digit)
+                    except Exception as exc:
+                        print(f"[AudioMonitor] Error callback: {exc}")
+            elif not digit:
+                self._last_digit = None
+
+            if len(self._buf) > self.WINDOW * 4:
+                self._buf = self._buf[-self.WINDOW:]
+
+        try:
+            with sd.InputStream(
+                device=self.device_index,
+                channels=1,
+                samplerate=sr_native,
+                blocksize=int(sr_native * 0.04),
+                callback=callback,
+            ):
+                self._stop_ev.wait()
+        except Exception as exc:
+            _emit_ivr("ivr_log", {"msg": f"❌ Error en monitor de audio: {exc}", "level": "error"})
+
+        _emit_ivr("ivr_log", {"msg": "🔇 Monitor de audio detenido", "level": "info"})
+
+    def stop(self):
+        self._stop_ev.set()
+
+
+def start_audio_monitor(device_index=None):
+    global _audio_monitor_thread
+    if _audio_monitor_thread and _audio_monitor_thread.is_alive():
+        _audio_monitor_thread.stop()
+        _audio_monitor_thread.join(timeout=2)
+    _audio_monitor_thread = PythonAudioMonitor(device_index)
+    _audio_monitor_thread.start()
+
+
+def stop_audio_monitor():
+    global _audio_monitor_thread
+    if _audio_monitor_thread:
+        _audio_monitor_thread.stop()
+        _audio_monitor_thread = None
+
+
+@app.route("/ivr/audio_devices")
+def ivr_audio_devices():
+    """Lista los dispositivos de audio de entrada Y salida del sistema."""
+    if not _SD_OK:
+        return jsonify({"ok": False, "error": "sounddevice no instalado",
+                        "inputs": [], "outputs": []}), 200
+    try:
+        devices = sd.query_devices()
+        default_in  = sd.default.device[0]
+        default_out = sd.default.device[1]
+        inputs, outputs = [], []
+        for i, d in enumerate(devices):
+            base = {
+                "index": i,
+                "name": d["name"],
+                "samplerate": int(d["default_samplerate"]),
+            }
+            if d["max_input_channels"] > 0:
+                inputs.append({**base, "channels": d["max_input_channels"],
+                               "is_default": (i == default_in)})
+            if d["max_output_channels"] > 0:
+                outputs.append({**base, "channels": d["max_output_channels"],
+                                "is_default": (i == default_out)})
+        return jsonify({"ok": True, "inputs": inputs, "outputs": outputs})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc), "inputs": [], "outputs": []}), 200
+
+
+@app.route("/ivr/monitor/start", methods=["POST"])
+def ivr_monitor_start():
+    """Inicia el monitor de audio en Python."""
+    data = request.get_json(silent=True) or {}
+    device_index = data.get("device_index")  # None = predeterminado
+    global _audio_monitor_device
+    _audio_monitor_device = device_index
+    start_audio_monitor(device_index)
+    return jsonify({"ok": True, "msg": "Monitor de audio iniciado"})
+
+
+@app.route("/ivr/monitor/stop", methods=["POST"])
+def ivr_monitor_stop():
+    """Detiene el monitor de audio en Python."""
+    stop_audio_monitor()
+    return jsonify({"ok": True, "msg": "Monitor detenido"})
+
+
+@app.route("/ivr/test_output", methods=["POST"])
+def ivr_test_output():
+    """Reproduce un pitido de prueba en el dispositivo de salida seleccionado."""
+    if not _SD_OK:
+        return jsonify({"ok": False, "error": "sounddevice no instalado"})
+    data = request.get_json(silent=True) or {}
+    device_index = data.get("device_index")  # None = predeterminado
+
+    def _play_beep():
+        try:
+            sr   = 44100
+            dur  = 1.0      # 1 segundo
+            freq = 1000.0   # 1 kHz — tono fácil de reconocer
+            t    = np.linspace(0, dur, int(sr * dur), endpoint=False)
+            # Envelope suave para evitar clicks
+            env  = np.where(t < 0.05, t / 0.05,
+                   np.where(t > 0.95, (dur - t) / 0.05, 1.0))
+            wave = (np.sin(2 * np.pi * freq * t) * env * 0.7).astype(np.float32)
+            kwargs = {"samplerate": sr}
+            if device_index is not None:
+                kwargs["device"] = int(device_index)
+            sd.play(wave, **kwargs)
+            sd.wait()
+            _emit_ivr("ivr_log", {"msg": "🔊 Pitido de prueba reproducido OK", "level": "success"})
+        except Exception as exc:
+            _emit_ivr("ivr_log", {"msg": f"❌ Error reproduciendo pitido: {exc}", "level": "error"})
+
+    threading.Thread(target=_play_beep, daemon=True).start()
+    return jsonify({"ok": True, "msg": "Reproduciendo pitido..."})
+
+
+@app.route("/ivr/test_input", methods=["POST"])
+def ivr_test_input():
+    """
+    Captura 3 segundos de audio del mic seleccionado y emite el nivel de energía
+    por socket. El frontend muestra una barra de nivel en tiempo real.
+    """
+    if not _SD_OK:
+        return jsonify({"ok": False, "error": "sounddevice no instalado"})
+    data = request.get_json(silent=True) or {}
+    device_index = data.get("device_index")
+
+    def _capture():
+        try:
+            dev_info  = sd.query_devices(device_index, "input")
+            sr_native = int(dev_info["default_samplerate"])
+            dev_name  = dev_info["name"]
+            _emit_ivr("ivr_log", {"msg": f"🎤 Probando entrada: [{dev_name}]...", "level": "info"})
+
+            duration  = 3.0   # segundos
+            frames    = []
+            stop_ev   = threading.Event()
+
+            def callback(indata, n, t, status):
+                chunk  = indata[:, 0].astype(np.float32)
+                energy = float(np.mean(chunk ** 2))
+                # Escala log para la barra (0-100)
+                level = 0 if energy < 1e-10 else min(100, int(10 * np.log10(energy / 1e-10)))
+                socketio.emit("input_test_level", {"level": level, "energy": round(energy, 8)})
+                frames.append(chunk)
+
+            with sd.InputStream(device=device_index, channels=1,
+                                samplerate=sr_native, blocksize=int(sr_native * 0.1),
+                                callback=callback):
+                stop_ev.wait(timeout=duration)
+
+            peak = max((float(np.max(np.abs(np.concatenate(frames)))) if frames else 0), 0)
+            _emit_ivr("ivr_log", {
+                "msg": f"✅ Prueba completada. Pico: {peak:.4f} {'(OK — se recibe señal)' if peak > 0.001 else '(SILENCIO — verifica el mic)'}",
+                "level": "success" if peak > 0.001 else "warn"
+            })
+            socketio.emit("input_test_done", {"peak": round(peak, 5)})
+        except Exception as exc:
+            _emit_ivr("ivr_log", {"msg": f"❌ Error prueba entrada: {exc}", "level": "error"})
+            socketio.emit("input_test_done", {"peak": 0})
+
+    threading.Thread(target=_capture, daemon=True).start()
+    return jsonify({"ok": True, "msg": "Capturando 3 segundos..."})
 
 
 # ══════════════════════════════════════════════
@@ -970,17 +1297,31 @@ def ivr_upload_audio():
 @app.route("/ivr/start", methods=["POST"])
 def ivr_start():
     """Inicia una campaña o una prueba con 1 número."""
-    global _ivr_campaign
+    global _ivr_campaign, _audio_monitor_device, _audio_output_device_name
     with _ivr_lock:
         if _ivr_campaign and _ivr_campaign.is_running:
             return jsonify({"ok": False, "error": "Ya hay una campaña activa"}), 409
 
     data = request.get_json(force=True) or {}
 
-    # Validar
     numbers = data.get("numbers", [])
     if not numbers:
         return jsonify({"ok": False, "error": "Sin números en la cola"}), 400
+
+    # Guardar dispositivos de audio seleccionados
+    audio_input_index  = data.get("audio_device")        # índice int | None
+    audio_output_index = data.get("audio_output_device") # índice int | None
+    _audio_monitor_device = audio_input_index
+
+    # Obtener nombre del dispositivo de salida para pygame
+    if audio_output_index is not None and _SD_OK:
+        try:
+            _audio_output_device_name = sd.query_devices(int(audio_output_index))["name"]
+            print(f"[IVR] Salida de audio: {_audio_output_device_name}")
+        except Exception:
+            _audio_output_device_name = None
+    else:
+        _audio_output_device_name = None
 
     config = {
         "numbers":       numbers,
@@ -1041,5 +1382,4 @@ if __name__ == "__main__":
     print("  DTMF Analyzer - Servidor Web  (WebSocket activo)")
     print("  Abre: http://localhost:5050")
     print("=" * 55)
-    socketio.run(app, host="0.0.0.0", port=5050, debug=False,
-                 allow_unsafe_werkzeug=True)
+    socketio.run(app, host="0.0.0.0", port=5050, debug=False, allow_unsafe_werkzeug=True)
