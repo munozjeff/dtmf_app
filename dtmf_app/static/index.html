@@ -53,7 +53,7 @@
 <main class="main">
 
   <!-- Hero -->
-  <section class="hero">
+  <section class="hero" id="hero">
     <h1 class="hero-title">
       Detección de Tonos
       <span class="gradient-text">DTMF Telefónicos</span>
@@ -82,7 +82,7 @@
   </section>
 
   <!-- Upload card -->
-  <section class="upload-section">
+  <section class="upload-section" id="upload-section">
     <div class="card upload-card" id="drop-zone">
       <div class="upload-icon" id="upload-icon">
         <svg viewBox="0 0 64 64" fill="none">
@@ -304,14 +304,14 @@
           </div>
         </div>
 
-        <!-- Audio despedida -->
+        <!-- Opciones IVR -->
         <div class="ivr-field">
-          <label class="ivr-label">Audio de despedida (tras tono detectado)</label>
-          <div class="ivr-file-row">
-            <label class="btn btn-ghost btn-sm" for="ivr-audio-bye-input">🎵 Cargar audio</label>
-            <input type="file" id="ivr-audio-bye-input" accept="audio/*,video/*" hidden />
-            <span class="ivr-file-name" id="ivr-audio-bye-name">Sin archivo</span>
+          <label class="ivr-label">Opciones IVR &mdash; dígito, descripción y audio de respuesta</label>
+          <p style="font-size:11px;color:var(--text-dim);margin-bottom:6px">Cada opción puede tener su propio audio de despedida (opcional, si no se carga se usa el global).</p>
+          <div class="ivr-options-list" id="ivr-options-list">
+            <!-- Se llena dinámicamente -->
           </div>
+          <button class="btn btn-ghost btn-sm ivr-add-option" id="ivr-add-option">+ Agregar opción</button>
         </div>
 
         <!-- Delay entre llamadas -->
@@ -324,15 +324,6 @@
         <div class="ivr-field">
           <label class="ivr-label" for="ivr-tone-timeout">Segundos de espera de tono</label>
           <input class="ivr-input" type="number" id="ivr-tone-timeout" value="10" min="3" max="60" />
-        </div>
-
-        <!-- Opciones IVR -->
-        <div class="ivr-field">
-          <label class="ivr-label">Opciones IVR (dígito → descripción)</label>
-          <div class="ivr-options-list" id="ivr-options-list">
-            <!-- Se llena dinámicamente -->
-          </div>
-          <button class="btn btn-ghost btn-sm ivr-add-option" id="ivr-add-option">+ Agregar opción</button>
         </div>
 
         <!-- Acciones -->

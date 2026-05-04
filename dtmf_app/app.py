@@ -763,10 +763,9 @@ class IVRCampaign(threading.Thread):
         def on_state(state: str):
             call_state["current"] = state
             _emit_ivr("ivr_status", {"number": number, "state": state})
-            _emit_ivr("ivr_log", {"msg": f"  ↳ Estado: {state}", "level": "info"})
-
+            _emit_ivr("ivr_log", {"msg": f"  -> Estado: {state}", "level": "info"})
             if state == "ACTIVE":
-                call_stop.set()   # salir del monitor, manejar en hilo principal
+                call_stop.set()
             elif state == "DISCONNECTED":
                 call_stop.set()
 
@@ -774,11 +773,9 @@ class IVRCampaign(threading.Thread):
             monitor = CallMonitor(device_id=self.device_id)
             monitor.start(on_state_change=on_state, stop_event=call_stop, clear_logs=True)
         else:
-            # Sin CallMonitor: esperar 3 s y asumir ACTIVE (modo degradado)
             time.sleep(3)
             call_state["current"] = "ACTIVE"
 
-        # Esperar hasta 60 s a que la llamada se conecte o desconecte
         deadline = time.time() + 60
         while not call_stop.is_set() and not self._stop_event.is_set():
             if time.time() > deadline:
@@ -787,7 +784,6 @@ class IVRCampaign(threading.Thread):
 
         final_state = call_state["current"]
 
-        # — 3. Reaccionar al estado ——————————————————————————
         if final_state == "ACTIVE":
             result_status, result_digit = self._handle_active(number)
         elif final_state in ("DISCONNECTED", "CONNECTING", "DIALING"):
@@ -799,10 +795,8 @@ class IVRCampaign(threading.Thread):
             call_stop.set()
             monitor.stop()
 
-        # — 4. Asegurar que la llamada esté colgada ——————————
         self._hang_up()
 
-        # — 5. Guardar resultado ———————————————————————————
         _save_call_result(number, result_status, result_digit)
         _emit_ivr("ivr_call_update", {
             "number": number, "status": result_status,
@@ -810,29 +804,26 @@ class IVRCampaign(threading.Thread):
             "processed": self.processed, "total": self.total
         })
         _emit_ivr("ivr_log", {
-            "msg": f"  ✔ {number} → {result_status}" + (f" (opción: {result_digit})" if result_digit else ""),
+            "msg": f"  OK {number} -> {result_status}" + (f" (opcion: {result_digit})" if result_digit else ""),
             "level": "success"
         })
 
     def _handle_active(self, number: str) -> tuple[str, str | None]:
         """
         La llamada fue contestada (ACTIVE).
-        Reproduce audio inicial, espera tono, actúa.
+        Reproduce audio inicial, espera tono, actua.
         Retorna (status, digit_detectado)
         """
-        _emit_ivr("ivr_log", {"msg": "  🎵 Llamada contestada — reproduciendo audio inicial", "level": "success"})
+        _emit_ivr("ivr_log", {"msg": "  Llamada contestada - reproduciendo audio inicial", "level": "success"})
 
-        # Reproducir audio inicial
         _play_audio(self.audio_initial)
         if self._stop_event.is_set():
             return "STOPPED", None
 
-        # Esperar tono DTMF del cliente (con reintentos usando audio intermedio)
-        for attempt in range(2):  # máx 2 intentos
+        for attempt in range(2):
             self._digit_event.clear()
             self._last_digit = None
-
-            _emit_ivr("ivr_log", {"msg": f"  👂 Esperando tono ({self.tone_timeout}s)…", "level": "info"})
+            _emit_ivr("ivr_log", {"msg": f"  Esperando tono ({self.tone_timeout}s)...", "level": "info"})
             self._digit_event.wait(timeout=self.tone_timeout)
 
             if self._stop_event.is_set():
@@ -840,26 +831,28 @@ class IVRCampaign(threading.Thread):
 
             digit = self._last_digit
             if digit and digit in self.ivr_options:
-                desc = self.ivr_options[digit]
-                _emit_ivr("ivr_log", {"msg": f"  ✅ Tono detectado: {digit} — {desc}", "level": "success"})
-                _emit_ivr("ivr_digit", {"number": number, "digit": digit, "option": desc})
+                option_data = self.ivr_options[digit]
+                if isinstance(option_data, dict):
+                    desc      = option_data.get("desc", digit)
+                    audio_bye = option_data.get("audio_bye") or self.audio_bye
+                else:
+                    desc      = str(option_data)
+                    audio_bye = self.audio_bye
 
-                # Reproducir despedida y colgar
-                _play_audio(self.audio_bye)
+                _emit_ivr("ivr_log", {"msg": f"  Tono detectado: {digit} - {desc}", "level": "success"})
+                _emit_ivr("ivr_digit", {"number": number, "digit": digit, "option": desc})
+                _play_audio(audio_bye)
                 self._hang_up()
                 return "ANSWERED_TONE", digit
 
             elif digit:
-                # Dígito detectado pero no configurado
-                _emit_ivr("ivr_log", {"msg": f"  ⚠️ Tono {digit} no configurado — ignorando", "level": "warn"})
+                _emit_ivr("ivr_log", {"msg": f"  Tono {digit} no configurado - ignorando", "level": "warn"})
 
-            # No tono válido → reproducir audio intermedio si hay
             if attempt == 0 and self.audio_middle:
-                _emit_ivr("ivr_log", {"msg": "  🔄 Reproduciendo mensaje intermedio", "level": "info"})
+                _emit_ivr("ivr_log", {"msg": "  Reproduciendo mensaje intermedio", "level": "info"})
                 _play_audio(self.audio_middle)
 
-        # No se detectó tono válido en los intentos
-        _emit_ivr("ivr_log", {"msg": "  ⏰ Sin tono válido — colgando", "level": "warn"})
+        _emit_ivr("ivr_log", {"msg": "  Sin tono valido - colgando", "level": "warn"})
         self._hang_up()
         return "ANSWERED_NO_TONE", None
 
@@ -892,7 +885,21 @@ class IVRCampaign(threading.Thread):
 def ivr_devices():
     """Lista los dispositivos ADB conectados."""
     try:
-        result = subprocess.run(["adb", "devices"], capture_output=True, text=True, timeout=5)
+        # Intentar encontrar adb en el PATH o con where
+        adb_cmd = "adb"
+        try:
+            check = subprocess.run(["adb", "version"], capture_output=True, timeout=3)
+            if check.returncode != 0:
+                raise FileNotFoundError
+        except (FileNotFoundError, OSError):
+            # En Windows intentar con 'where'
+            where = subprocess.run(["where", "adb"], capture_output=True, text=True, timeout=3)
+            if where.returncode == 0 and where.stdout.strip():
+                adb_cmd = where.stdout.strip().splitlines()[0]
+            else:
+                return jsonify({"ok": False, "error": "adb no encontrado en el sistema. Instala Android SDK Platform-Tools y agrégalo al PATH."}), 500
+
+        result = subprocess.run([adb_cmd, "devices"], capture_output=True, text=True, timeout=5)
         lines = result.stdout.strip().splitlines()
         devices = []
         for line in lines[1:]:  # saltar cabecera

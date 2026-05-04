@@ -629,8 +629,6 @@ newBtn.addEventListener("click", () => {
   const audioInitName   = document.getElementById("ivr-audio-initial-name");
   const audioMidInput   = document.getElementById("ivr-audio-middle-input");
   const audioMidName    = document.getElementById("ivr-audio-middle-name");
-  const audioByeInput   = document.getElementById("ivr-audio-bye-input");
-  const audioByeName    = document.getElementById("ivr-audio-bye-name");
 
   const delayInput      = document.getElementById("ivr-delay");
   const toneTimeoutInput= document.getElementById("ivr-tone-timeout");
@@ -696,7 +694,11 @@ newBtn.addEventListener("click", () => {
     optionsList.querySelectorAll(".ivr-option-row").forEach(row => {
       const digit = row.querySelector(".ivr-option-digit").value.trim();
       const desc  = row.querySelector(".ivr-option-desc").value.trim();
-      if (digit && desc) opts[digit] = desc;
+      const path  = row.dataset.audioByePath || null;
+      if (digit && desc) {
+        // Si tiene audio propio, enviar objeto; si no, string simple
+        opts[digit] = path ? { desc, audio_bye: path } : desc;
+      }
     });
     return opts;
   }
@@ -709,7 +711,7 @@ newBtn.addEventListener("click", () => {
       tone_timeout:  parseInt(toneTimeoutInput.value) || 10,
       audio_initial: ivrAudioPaths.initial || null,
       audio_middle:  ivrAudioPaths.middle  || null,
-      audio_bye:     ivrAudioPaths.bye     || null,
+      audio_bye:     null,   // Se maneja por opción individual
       ivr_options:   buildIVROptions(),
     };
   }
@@ -727,11 +729,22 @@ newBtn.addEventListener("click", () => {
   // ── Dispositivos ADB ─────────────────────────────────────────
 
   async function ivrLoadDevices() {
-    deviceSelect.innerHTML = "<option value=''>Cargando…</option>";
+    deviceSelect.innerHTML = "<option value=''>Cargando...</option>";
     try {
       const r = await fetch("/ivr/devices");
+      // Verificar que la respuesta sea JSON
+      const ct = r.headers.get("content-type") || "";
+      if (!ct.includes("json")) {
+        ivrLog(`ERROR: El servidor no responde correctamente (HTTP ${r.status}). Reinicia el servidor.`, "error");
+        deviceSelect.innerHTML = "<option value=''>Reinicia el servidor</option>";
+        return;
+      }
       const d = await r.json();
-      deviceSelect.innerHTML = "<option value=''>— Seleccionar dispositivo —</option>";
+      deviceSelect.innerHTML = "<option value=''>-- Seleccionar dispositivo --</option>";
+      if (d.ok === false) {
+        ivrLog(`ERROR ADB: ${d.error}`, "error");
+        return;
+      }
       if (d.devices && d.devices.length) {
         d.devices.forEach(dev => {
           const opt = document.createElement("option");
@@ -739,13 +752,13 @@ newBtn.addEventListener("click", () => {
           opt.textContent = dev;
           deviceSelect.appendChild(opt);
         });
-        ivrLog(`✅ ${d.devices.length} dispositivo(s) detectado(s)`, "success");
+        ivrLog(`${d.devices.length} dispositivo(s) detectado(s)`, "success");
       } else {
-        ivrLog("⚠️ Sin dispositivos ADB conectados", "warn");
+        ivrLog("Sin dispositivos ADB conectados", "warn");
       }
     } catch (e) {
       deviceSelect.innerHTML = "<option value=''>Error ADB</option>";
-      ivrLog(`❌ Error conectando ADB: ${e.message}`, "error");
+      ivrLog(`ERROR conectando ADB: ${e.message}. Asegurate de que el servidor este corriendo.`, "error");
     }
   }
 
@@ -809,22 +822,49 @@ newBtn.addEventListener("click", () => {
   audioMidInput.addEventListener("change", () => {
     if (audioMidInput.files[0]) uploadAudio(audioMidInput.files[0], "middle", audioMidName);
   });
-  audioByeInput.addEventListener("change", () => {
-    if (audioByeInput.files[0]) uploadAudio(audioByeInput.files[0], "bye", audioByeName);
-  });
 
   // ── Opciones IVR dinámicas ───────────────────────────────────
 
   function addOptionRow(digit = "", desc = "") {
     const row = document.createElement("div");
     row.className = "ivr-option-row";
+    row.dataset.audioByePath = "";
+    const uid = `opt-audio-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     row.innerHTML = `
       <input class="ivr-input ivr-option-digit" type="text" maxlength="1"
-             placeholder="1" value="${digit}" title="Dígito DTMF" />
+             placeholder="1" value="${digit}" title="Digito DTMF" />
       <input class="ivr-input ivr-option-desc" type="text"
-             placeholder="Descripción (ej: Interesado)" value="${desc}" />
-      <button class="ivr-option-remove" title="Eliminar">✕</button>
+             placeholder="Descripcion (ej: Interesado)" value="${desc}" />
+      <label class="btn btn-ghost btn-sm" for="${uid}" title="Audio de despedida para esta opcion" style="white-space:nowrap;flex-shrink:0">
+        <input type="file" id="${uid}" accept="audio/*,video/*" hidden />
+        <span class="ivr-opt-audio-name">+ Audio</span>
+      </label>
+      <button class="ivr-option-remove" title="Eliminar">&times;</button>
     `;
+    const fileInput = row.querySelector(`#${uid}`);
+    const audioName = row.querySelector(".ivr-opt-audio-name");
+    fileInput.addEventListener("change", async () => {
+      const file = fileInput.files[0];
+      if (!file) return;
+      audioName.textContent = "Subiendo...";
+      const fd = new FormData();
+      fd.append("file", file);
+      fd.append("type", `opt_${digit || "x"}`);
+      try {
+        const r = await fetch("/ivr/upload_audio", { method: "POST", body: fd });
+        const d = await r.json();
+        if (d.ok) {
+          row.dataset.audioByePath = d.path;
+          audioName.textContent = file.name.slice(0, 12) + (file.name.length > 12 ? "..." : "");
+          ivrLog(`Audio opcion '${digit}' cargado: ${file.name}`, "success");
+        } else {
+          audioName.textContent = "Error";
+          ivrLog(`Error: ${d.error}`, "error");
+        }
+      } catch (e) {
+        audioName.textContent = "Error";
+      }
+    });
     row.querySelector(".ivr-option-remove").addEventListener("click", () => row.remove());
     optionsList.appendChild(row);
   }
