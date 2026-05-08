@@ -725,8 +725,12 @@ def _save_call_result(number: str, status: str, digit: str | None, notes: str = 
         ])
 
 
-def _play_audio(path: str):
-    """Reproduce un archivo de audio usando pygame, con soporte de dispositivo de salida."""
+def _play_audio(path: str, cancel_event: threading.Event = None):
+    """
+    Reproduce un archivo de audio usando pygame, con soporte de dispositivo de salida.
+    Si se proporciona cancel_event y se activa, la reproducción se detiene inmediatamente
+    (útil para cortar el audio cuando el cliente cuelga durante la llamada).
+    """
     if not _PYGAME_OK or not path or not os.path.isfile(path):
         return
     try:
@@ -748,6 +752,11 @@ def _play_audio(path: str):
         pygame.mixer.music.play()
         start = time.time()
         while pygame.mixer.music.get_busy() and (time.time() - start) < 60:
+            # Verificar si el cliente colgó o se solicitó detener la campaña
+            if cancel_event and cancel_event.is_set():
+                pygame.mixer.music.stop()
+                print(f"[IVR-Audio] Reproducción cancelada (llamada terminada): {os.path.basename(path)}")
+                return
             time.sleep(0.1)
         print(f"[IVR-Audio] Fin reproduccion: {os.path.basename(path)}")
     except Exception as exc:
@@ -948,17 +957,19 @@ class IVRCampaign(threading.Thread):
             return
 
         # — 2. Monitorear estado —————————————————————————————
-        call_stop  = threading.Event()
-        call_state = {"current": "CONNECTING"}
+        call_stop          = threading.Event()
+        call_disconnected  = threading.Event()   # ← se activa si el cliente cuelga EN CUALQUIER momento
+        call_state         = {"current": "CONNECTING"}
 
         def on_state(state: str):
             call_state["current"] = state
             _emit_ivr("ivr_status", {"number": number, "state": state})
             _emit_ivr("ivr_log", {"msg": f"  -> Estado: {state}", "level": "info"})
             if state == "ACTIVE":
-                call_stop.set()
+                call_stop.set()          # desbloquea el bucle de espera inicial
             elif state == "DISCONNECTED":
-                call_stop.set()
+                call_stop.set()          # desbloquea el bucle de espera inicial
+                call_disconnected.set()  # señala cuelgue a _handle_active()
 
         if _MONITOR_OK:
             monitor = CallMonitor(device_id=self.device_id)
@@ -976,7 +987,8 @@ class IVRCampaign(threading.Thread):
         final_state = call_state["current"]
 
         if final_state == "ACTIVE":
-            result_status, result_digit = self._handle_active(number)
+            # Pasamos call_disconnected para que _handle_active() reaccione si el cliente cuelga
+            result_status, result_digit = self._handle_active(number, call_disconnected)
         elif final_state in ("DISCONNECTED", "CONNECTING", "DIALING"):
             result_status = "NO_ANSWER" if final_state != "DISCONNECTED" else "DISCONNECTED"
         else:
@@ -1010,23 +1022,41 @@ class IVRCampaign(threading.Thread):
                     option_desc = str(opt)
             _send_whatsapp_notification(number, result_status, result_digit, option_desc)
 
-    def _handle_active(self, number: str) -> tuple[str, str | None]:
+    def _handle_active(self, number: str,
+                        disconnect_event: threading.Event = None) -> tuple[str, str | None]:
         """
         La llamada fue contestada (ACTIVE).
         Reproduce audio inicial, espera tono válido, actúa.
         Tonos no configurados se ignoran y se sigue esperando.
+
+        disconnect_event: evento que se activa si el cliente cuelga en cualquier momento.
+                          Cuando se detecta, se interrumpe la reproducción de audio y
+                          el bucle de espera de tono inmediatamente.
+
         Retorna (status, digit_detectado)
         """
+        # Evento combinado: cuelgue del cliente O stop de la campaña
+        def _caller_gone() -> bool:
+            """True si el cliente colgó o se detuvo la campaña."""
+            return self._stop_event.is_set() or (
+                disconnect_event is not None and disconnect_event.is_set()
+            )
+
         _emit_ivr("ivr_log", {"msg": "  Llamada contestada — activando monitor de audio...", "level": "success"})
         start_audio_monitor(_audio_monitor_device)
 
         self._digit_event.clear()
         self._last_digit = None
 
+        # ── Audio inicial ────────────────────────────────────────────
         _emit_ivr("ivr_log", {"msg": "  Reproduciendo audio inicial", "level": "info"})
-        _play_audio(self.audio_initial)
-        if self._stop_event.is_set():
+        _play_audio(self.audio_initial, cancel_event=disconnect_event)
+
+        if _caller_gone():
             stop_audio_monitor()
+            if disconnect_event and disconnect_event.is_set():
+                _emit_ivr("ivr_log", {"msg": "  📵 Cliente colgó durante el audio inicial", "level": "warn"})
+                return "DISCONNECTED_DURING_CALL", None
             return "STOPPED", None
 
         # Barge-in: si ya se detectó algo durante el audio, notificar pero
@@ -1034,14 +1064,19 @@ class IVRCampaign(threading.Thread):
         if self._digit_event.is_set():
             _emit_ivr("ivr_log", {"msg": "  (Señal detectada durante el audio — evaluando...)", "level": "info"})
 
+        # ── Bucles de espera de tono ──────────────────────────────────
         for attempt in range(2):
             deadline = time.time() + self.tone_timeout
             _emit_ivr("ivr_log", {"msg": f"  Esperando tono válido ({self.tone_timeout}s)...", "level": "info"})
 
             digit = None
             while time.time() < deadline:
-                if self._stop_event.is_set():
+                # Verificar cuelgue o stop de campaña
+                if _caller_gone():
                     stop_audio_monitor()
+                    if disconnect_event and disconnect_event.is_set():
+                        _emit_ivr("ivr_log", {"msg": "  📵 Cliente colgó mientras esperaba tono", "level": "warn"})
+                        return "DISCONNECTED_DURING_CALL", None
                     return "STOPPED", None
 
                 # Esperar el próximo evento con el tiempo restante
@@ -1076,19 +1111,30 @@ class IVRCampaign(threading.Thread):
 
                 _emit_ivr("ivr_log", {"msg": f"  ✅ Tono válido: {digit} — {desc}", "level": "success"})
                 _emit_ivr("ivr_digit", {"number": number, "digit": digit, "option": desc})
-                _play_audio(audio_bye)
+                _play_audio(audio_bye, cancel_event=disconnect_event)
                 self._hang_up()
                 stop_audio_monitor()
                 return "ANSWERED_TONE", digit
 
             # Timeout sin tono válido
             if attempt == 0 and self.audio_middle:
-                _emit_ivr("ivr_log", {"msg": "  Sin respuesta — reproduciendo mensaje intermedio", "level": "info"})
-                _play_audio(self.audio_middle)
-                if self._stop_event.is_set():
+                # Verificar antes de reproducir el mensaje intermedio
+                if _caller_gone():
                     stop_audio_monitor()
+                    if disconnect_event and disconnect_event.is_set():
+                        _emit_ivr("ivr_log", {"msg": "  📵 Cliente colgó antes del mensaje intermedio", "level": "warn"})
+                        return "DISCONNECTED_DURING_CALL", None
                     return "STOPPED", None
 
+                _emit_ivr("ivr_log", {"msg": "  Sin respuesta — reproduciendo mensaje intermedio", "level": "info"})
+                _play_audio(self.audio_middle, cancel_event=disconnect_event)
+
+                if _caller_gone():
+                    stop_audio_monitor()
+                    if disconnect_event and disconnect_event.is_set():
+                        _emit_ivr("ivr_log", {"msg": "  📵 Cliente colgó durante el mensaje intermedio", "level": "warn"})
+                        return "DISCONNECTED_DURING_CALL", None
+                    return "STOPPED", None
 
         _emit_ivr("ivr_log", {"msg": "  Sin tono valido - colgando", "level": "warn"})
         self._hang_up()

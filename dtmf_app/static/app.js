@@ -67,10 +67,32 @@ function onCallUpdate({ number, status }) {
   if (number) {
     const pill = document.getElementById("ivr-pill-" + number);
     if (pill) {
-      const cls = { CALLING:"p-call", ACTIVE:"p-act", ANSWERED_TONE:"p-ok",
-                    ANSWERED_NO_TONE:"p-warn", NO_ANSWER:"p-warn", ERROR:"p-err" };
+      const cls = {
+        CALLING:                 "p-call",
+        ACTIVE:                  "p-act",
+        ANSWERED_TONE:           "p-ok",
+        ANSWERED_NO_TONE:        "p-warn",
+        NO_ANSWER:               "p-warn",
+        DISCONNECTED:            "p-warn",
+        DISCONNECTED_DURING_CALL:"p-disc",   // 📵 colgó mientras hablaba
+        ERROR:                   "p-err",
+      };
+      const labels = {
+        DISCONNECTED_DURING_CALL: "📵 Colgó",
+        ANSWERED_TONE:            "✅ Tono",
+        ANSWERED_NO_TONE:         "⚠️ Sin tono",
+        NO_ANSWER:                "📭 No contestó",
+        CALLING:                  "📞 Marcando",
+        ACTIVE:                   "🟢 Activa",
+        DISCONNECTED:             "❌ Desconect.",
+        ERROR:                    "❌ Error",
+      };
       pill.className = "pill " + (cls[status] || "p-pend");
-      pill.textContent = status;
+      pill.textContent = labels[status] || status;
+    }
+    // Log especial para cuelgue durante llamada activa
+    if (status === "DISCONNECTED_DURING_CALL") {
+      addLog("📵 " + number + " — colgó durante la llamada (audio detenido)", "warn");
     }
   }
 }
