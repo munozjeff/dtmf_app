@@ -31,3 +31,6 @@ dtmf_app/static/plots/
 # Logs and temp
 *.log
 .tempmediaStorage/
+
+# WhatsApp Chrome profile (archivos bloqueados por Chrome — no versionar)
+whatsapp_chrome_profile/
