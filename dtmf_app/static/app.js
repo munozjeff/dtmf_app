@@ -216,6 +216,67 @@ function endCampaign() {
   E("ivr-refresh-devices")?.addEventListener("click", _loadADB);
   loadADB();
 
+  // ── Monitor ADB en tiempo real ────────────────────────────────
+  function _adbUpdateDot(connected, deviceId) {
+    const dot = E("adb-status-dot");
+    const txt = E("adb-status-txt");
+    if (!dot || !txt) return;
+
+    if (!deviceId) {
+      dot.className = "dot";
+      txt.textContent = "Sin dispositivo seleccionado";
+      txt.style.color = "#64748b";
+      return;
+    }
+    if (connected) {
+      dot.className = "dot on";
+      txt.textContent = "Conectado: " + deviceId;
+      txt.style.color = "#4ade80";
+    } else {
+      dot.className = "dot err";
+      txt.textContent = "⚠ DESCONECTADO — reconectando…";
+      txt.style.color = "#f87171";
+    }
+  }
+
+  // Escuchar eventos del watchdog (server → UI via socket)
+  ivrSocket.on("adb_status", ({ connected, device_id }) => {
+    _adbUpdateDot(connected, device_id);
+    if (!connected && ivrRunning) {
+      addLog("⚠️ ADB desconectado — campaña pausada hasta reconexión", "warn");
+    } else if (connected && ivrRunning) {
+      addLog("✅ ADB reconectado — campaña reanudada", "ok");
+    }
+  });
+
+  // Polling propio: verifica conexión cada 5s cuando hay dispositivo seleccionado
+  // (cubre el caso en que no hay campaña activa y el watchdog no está corriendo)
+  async function _pollADBStatus() {
+    const sel = E("ivr-device");
+    const deviceId = sel?.value?.trim();
+    if (!deviceId || ivrRunning) return;   // si hay campaña el watchdog ya lo hace
+    try {
+      const r = await fetch("/ivr/adb/status?device_id=" + encodeURIComponent(deviceId));
+      const d = await r.json();
+      _adbUpdateDot(d.connected, deviceId);
+    } catch (e) { /* ignorar */ }
+  }
+  setInterval(_pollADBStatus, 5000);
+
+  // Actualizar dot cuando el usuario cambia el dispositivo
+  E("ivr-device")?.addEventListener("change", () => {
+    const v = E("ivr-device")?.value;
+    if (!v) {
+      _adbUpdateDot(false, null);
+    } else {
+      // Verificación inmediata al seleccionar
+      fetch("/ivr/adb/status?device_id=" + encodeURIComponent(v))
+        .then(r => r.json())
+        .then(d => _adbUpdateDot(d.connected, v))
+        .catch(() => {});
+    }
+  });
+
   // ── Excel ──
   let ivrNumbers = [];
   E("ivr-excel-input")?.addEventListener("change", e => {
@@ -389,4 +450,142 @@ function endCampaign() {
   E("ivr-clear-log")?.addEventListener("click", () => {
     const log = E("ivr-log"); if (log) log.innerHTML = "";
   });
+
+  // ══════════════════════════════════════════════════════════════
+  //  NOTIFICACIONES WHATSAPP
+  // ══════════════════════════════════════════════════════════════
+
+  // Indicador de estado del navegador WA
+  const WA_DOTS = {
+    closed:      [],
+    opening:     ["wa-open"],
+    ready:       ["wa-ready"],
+    error:       ["wa-err"],
+    unavailable: ["wa-err"],
+  };
+  const WA_LABELS = {
+    closed:      "Navegador cerrado",
+    opening:     "Abriendo… escanea el QR",
+    ready:       "WhatsApp listo ✓",
+    error:       "Error — vuelve a abrir",
+    unavailable: "selenium no instalado",
+  };
+
+  function _waUpdateDot(status, message, queueSize) {
+    const dot = E("wa-status-dot");
+    const txt = E("wa-status-txt");
+    const badge = E("wa-queue-badge");
+
+    if (dot) {
+      dot.className = "dot " + (WA_DOTS[status] || []).join(" ");
+    }
+    if (txt) {
+      txt.textContent = message || WA_LABELS[status] || status;
+    }
+    if (badge) {
+      if (queueSize > 0) {
+        badge.hidden = false;
+        badge.textContent = queueSize + " en cola";
+      } else {
+        badge.hidden = true;
+      }
+    }
+  }
+
+  // Cargar config inicial del servidor
+  async function _waLoadConfig() {
+    try {
+      const r = await fetch("/ivr/wa/config");
+      const d = await r.json();
+      if (!d.ok) return;
+
+      const cfg = d.config || {};
+      const chk = E("wa-enabled");
+      if (chk) chk.checked = !!cfg.enabled;
+
+      const ct = E("wa-contact");
+      if (ct) ct.value = cfg.contact || "";
+
+      const bk = E("wa-backup");
+      if (bk) bk.value = cfg.backup || "";
+
+      const br = d.browser || {};
+      _waUpdateDot(br.status || "closed", br.message, br.queue_size || 0);
+
+      if (!d.available) {
+        _waUpdateDot("unavailable", "⚠ Instala: pip install selenium webdriver-manager", 0);
+      }
+    } catch (e) { /* ignorar */ }
+  }
+
+  // Guardar config en servidor
+  async function _waSaveConfig() {
+    try {
+      await fetch("/ivr/wa/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          enabled: E("wa-enabled")?.checked || false,
+          contact: E("wa-contact")?.value?.trim() || "",
+          backup:  E("wa-backup")?.value?.trim() || "",
+        })
+      });
+    } catch (e) { /* ignorar */ }
+  }
+
+  // Toggle y campos → guardar
+  E("wa-enabled")?.addEventListener("change", _waSaveConfig);
+  E("wa-contact")?.addEventListener("input",  debounce(_waSaveConfig, 800));
+  E("wa-backup")?.addEventListener("input",   debounce(_waSaveConfig, 800));
+
+  // Botón: Abrir Chrome con perfil persistente
+  E("wa-open-browser")?.addEventListener("click", async () => {
+    const btn = E("wa-open-browser");
+    if (btn) { btn.disabled = true; btn.textContent = "⏳ Abriendo…"; }
+    _waUpdateDot("opening", "Iniciando Chrome…", 0);
+    addLog("🌐 Abriendo Chrome para WhatsApp…", "info");
+    try {
+      const r = await fetch("/ivr/wa/open_browser", { method: "POST" });
+      const d = await r.json();
+      if (d.ok) {
+        addLog("✅ " + d.msg, "ok");
+        _waUpdateDot("opening", "Escanea el QR si es necesario…", 0);
+      } else {
+        addLog("❌ " + (d.error || d.msg || "Error"), "err");
+        _waUpdateDot("error", d.error || "Error al abrir", 0);
+      }
+    } catch (e) {
+      addLog("❌ Error de red: " + e.message, "err");
+      _waUpdateDot("error", "Error de red", 0);
+    } finally {
+      if (btn) { btn.disabled = false; btn.innerHTML = "&#x1F310; Abrir WhatsApp"; }
+    }
+  });
+
+  // Botón: Cerrar Chrome
+  E("wa-close-browser")?.addEventListener("click", async () => {
+    try {
+      const r = await fetch("/ivr/wa/close_browser", { method: "POST" });
+      const d = await r.json();
+      if (d.ok) {
+        addLog("🔴 Navegador WhatsApp cerrado", "warn");
+        _waUpdateDot("closed", "Navegador cerrado", 0);
+      }
+    } catch (e) { /* ignorar */ }
+  });
+
+  // Polling de estado del navegador WA (cada 4 segundos)
+  async function _waPollStatus() {
+    try {
+      const r = await fetch("/ivr/wa/status");
+      const d = await r.json();
+      _waUpdateDot(d.status || "closed", d.message, d.queue_size || 0);
+    } catch (e) { /* ignorar */ }
+  }
+  setInterval(_waPollStatus, 4000);
+
+  // Cargar config al arrancar
+  _waLoadConfig();
+
 })();
+

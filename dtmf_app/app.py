@@ -49,6 +49,16 @@ except Exception as _e:
     _MONITOR_OK = False
     print(f"[WARN] CallMonitor no disponible: {_e}")
 
+# IVR — WhatsApp Notifier
+try:
+    from notificaciones.whatsapp_ivr_notifier import (
+        WhatsAppIVRNotifier, build_notification_message
+    )
+    _WA_OK = True
+except Exception as _e:
+    _WA_OK = False
+    print(f"[WARN] WhatsAppIVRNotifier no disponible: {_e}")
+
 # Audio del sistema (monitor DTMF en Python)
 try:
     import sounddevice as sd
@@ -630,6 +640,7 @@ os.makedirs(IVR_AUDIO_FOLDER, exist_ok=True)
 # Estado global de la campaña (singleton)
 _ivr_campaign: "IVRCampaign | None" = None
 _ivr_lock = threading.Lock()
+_adb_watchdog: "ADBWatchdog | None" = None   # monitor de conexión ADB
 
 # Cuando el IVR está ACTIVO, cualquier dígito DTMF detectado por
 # el monitor de micrófono se desvía aquí en lugar de sólo emitirse a la UI
@@ -637,6 +648,68 @@ _ivr_dtmf_callback = None   # callable(digit) | None
 
 # Dispositivo de salida de audio seleccionado (nombre para pygame)
 _audio_output_device_name: str | None = None
+
+# ── WhatsApp Notifications ──────────────────────────────────────────
+WA_CONFIG_FILE = os.path.join(os.path.dirname(__file__), "wa_notif_config.json")
+
+# Instancia única del notificador
+_wa_notifier: "WhatsAppIVRNotifier | None" = None
+
+# Config activa (se carga del JSON al iniciar)
+_wa_config: dict = {
+    "enabled": False,
+    "contact": "",   # grupo o número principal
+    "backup":  "",   # número de respaldo
+}
+
+
+def _wa_load_config():
+    """Carga la configuración de notificaciones WA desde disco."""
+    global _wa_config, _wa_notifier
+    if os.path.isfile(WA_CONFIG_FILE):
+        try:
+            with open(WA_CONFIG_FILE, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            _wa_config.update(data)
+            print(f"[WA] Config cargada: enabled={_wa_config['enabled']} contact='{_wa_config['contact']}'")
+        except Exception as exc:
+            print(f"[WA] Error leyendo config: {exc}")
+    # Inicializar instancia del notificador si selenium está disponible
+    if _WA_OK:
+        _wa_notifier = WhatsAppIVRNotifier()
+
+
+def _wa_save_config():
+    """Persiste la configuración de notificaciones WA en disco."""
+    try:
+        with open(WA_CONFIG_FILE, "w", encoding="utf-8") as fh:
+            json.dump(_wa_config, fh, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        print(f"[WA] Error guardando config: {exc}")
+
+
+def _send_whatsapp_notification(number: str, status: str,
+                                 digit: str | None = None,
+                                 option_desc: str | None = None):
+    """
+    Envía notificación WhatsApp al finalizar una llamada.
+    Se llama desde _process_number() si las notificaciones están activas.
+    """
+    if not _WA_OK or not _wa_notifier:
+        return
+    if not _wa_config.get("enabled"):
+        return
+    contacto = _wa_config.get("contact", "").strip()
+    if not contacto:
+        print("[WA] ⚠ Sin contacto destino configurado")
+        return
+    backup = _wa_config.get("backup", "").strip() or None
+    mensaje = build_notification_message(number, status, digit, option_desc)
+    _wa_notifier.enqueue_notification(contacto, mensaje, backup)
+
+
+# Cargar config al arrancar
+_wa_load_config()
 
 
 def _save_call_result(number: str, status: str, digit: str | None, notes: str = ""):
@@ -684,6 +757,85 @@ def _play_audio(path: str):
 def _emit_ivr(event: str, data: dict):
     """Emite un evento Socket.IO desde cualquier hilo."""
     socketio.emit(event, data)
+
+
+# ════════════════════════════════════════════
+#  ADB WATCHDOG — Monitor de conexión en tiempo real
+# ════════════════════════════════════════════
+
+class ADBWatchdog(threading.Thread):
+    """
+    Monitorea en tiempo real si el dispositivo ADB sigue conectado.
+    - Si se desconecta: pausa la campaña activa y emite alerta a la UI.
+    - Si reconecta:     reanuda automáticamente la campaña.
+    """
+    CHECK_INTERVAL = 3.0   # segundos entre verificaciones
+
+    def __init__(self, device_id: str):
+        super().__init__(daemon=True, name=f"ADBWatchdog-{device_id}")
+        self.device_id  = device_id
+        self._stop_ev   = threading.Event()
+        self._connected = True   # optimista al inicio
+
+    # ── Control ──────────────────────────────────────────────────
+
+    def stop(self):
+        self._stop_ev.set()
+
+    # ── Hilo principal ────────────────────────────────────────────
+
+    def run(self):
+        print(f"[ADBWatchdog] Iniciando monitoreo: {self.device_id}")
+        # Primera verificación inmediata
+        self._connected = self._check()
+        _emit_ivr("adb_status", {
+            "connected": self._connected,
+            "device_id": self.device_id,
+        })
+
+        while not self._stop_ev.wait(self.CHECK_INTERVAL):
+            connected = self._check()
+            if connected != self._connected:
+                self._connected = connected
+                self._on_change(connected)
+
+        print(f"[ADBWatchdog] Detenido: {self.device_id}")
+
+    def _check(self) -> bool:
+        """Retorna True si el dispositivo responde como 'device' en ADB."""
+        try:
+            cmd = ["adb", "-s", self.device_id, "get-state"]
+            r   = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            return r.returncode == 0 and "device" in r.stdout
+        except Exception:
+            return False
+
+    def _on_change(self, connected: bool):
+        """Reacciona al cambio de estado de conexión."""
+        _emit_ivr("adb_status", {"connected": connected, "device_id": self.device_id})
+
+        if connected:
+            # Reconectado — reanudar campaña si estaba pausada
+            _emit_ivr("ivr_log", {
+                "msg": f"✅ Dispositivo ADB reconectado: {self.device_id}",
+                "level": "success"
+            })
+            if _ivr_campaign and _ivr_campaign.is_running:
+                _ivr_campaign.resume()
+                _emit_ivr("ivr_log", {"msg": "▶️ Campaña reanudada", "level": "success"})
+        else:
+            # Desconectado — pausar campaña
+            _emit_ivr("ivr_log", {
+                "msg": f"⚠️ ADB desconectado: {self.device_id} — campaña en pausa",
+                "level": "warn"
+            })
+            if _ivr_campaign and _ivr_campaign.is_running:
+                _ivr_campaign.pause()
+                _emit_ivr("ivr_log", {
+                    "msg": "⏸️ Esperando reconexión del dispositivo…",
+                    "level": "warn"
+                })
+
 
 
 class IVRCampaign(threading.Thread):
@@ -846,6 +998,17 @@ class IVRCampaign(threading.Thread):
             "msg": f"  OK {number} -> {result_status}" + (f" (opcion: {result_digit})" if result_digit else ""),
             "level": "success"
         })
+
+        # ── WhatsApp notification ────────────────────────────────────
+        if _wa_config.get("enabled") and _wa_notifier:
+            option_desc = None
+            if result_digit and self.ivr_options:
+                opt = self.ivr_options.get(result_digit)
+                if isinstance(opt, dict):
+                    option_desc = opt.get("desc", result_digit)
+                elif opt:
+                    option_desc = str(opt)
+            _send_whatsapp_notification(number, result_status, result_digit, option_desc)
 
     def _handle_active(self, number: str) -> tuple[str, str | None]:
         """
@@ -1303,6 +1466,57 @@ def ivr_upload_audio():
     return jsonify({"ok": True, "path": dest, "filename": f.filename, "type": audio_type})
 
 
+@app.route("/ivr/wa/config", methods=["GET"])
+def wa_config_get():
+    """Devuelve la configuración actual de notificaciones WhatsApp."""
+    return jsonify({
+        "ok":      True,
+        "config":  _wa_config,
+        "available": _WA_OK,
+        "browser": _wa_notifier.get_status() if _wa_notifier else {"status": "unavailable"},
+    })
+
+
+@app.route("/ivr/wa/config", methods=["POST"])
+def wa_config_post():
+    """Guarda la configuración de notificaciones WhatsApp."""
+    global _wa_config
+    data = request.get_json(force=True) or {}
+    _wa_config["enabled"] = bool(data.get("enabled", False))
+    _wa_config["contact"] = str(data.get("contact", "")).strip()
+    _wa_config["backup"]  = str(data.get("backup",  "")).strip()
+    _wa_save_config()
+    return jsonify({"ok": True, "config": _wa_config})
+
+
+@app.route("/ivr/wa/open_browser", methods=["POST"])
+def wa_open_browser():
+    """Abre Chrome con el perfil persistente de WhatsApp."""
+    if not _WA_OK or not _wa_notifier:
+        return jsonify({"ok": False, "error": "selenium no disponible"}), 500
+    ok, msg = _wa_notifier.open_browser()
+    return jsonify({"ok": ok, "msg": msg})
+
+
+@app.route("/ivr/wa/close_browser", methods=["POST"])
+def wa_close_browser():
+    """Cierra el navegador de WhatsApp."""
+    if not _wa_notifier:
+        return jsonify({"ok": False, "error": "Notificador no disponible"}), 500
+    ok, msg = _wa_notifier.close_browser()
+    return jsonify({"ok": ok, "msg": msg})
+
+
+@app.route("/ivr/wa/status")
+def wa_status():
+    """Estado actual del navegador de notificaciones."""
+    if not _wa_notifier:
+        return jsonify({"status": "unavailable", "message": "selenium no instalado", "available": False})
+    s = _wa_notifier.get_status()
+    s["available"] = _WA_OK
+    return jsonify(s)
+
+
 @app.route("/ivr/start", methods=["POST"])
 def ivr_start():
     """Inicia una campaña o una prueba con 1 número."""
@@ -1348,6 +1562,26 @@ def ivr_start():
         _ivr_campaign = IVRCampaign(config)
         _ivr_campaign.start()
 
+    # ── Iniciar watchdog ADB ─────────────────────────────────────
+    global _adb_watchdog
+    device_id = config.get("device_id")
+    if device_id:
+        if _adb_watchdog and _adb_watchdog.is_alive():
+            _adb_watchdog.stop()
+        _adb_watchdog = ADBWatchdog(device_id)
+        _adb_watchdog.start()
+
+    # ── Asegurar browser WA si notificaciones activas ────────────────
+    if _wa_config.get("enabled") and _wa_notifier:
+        contact = _wa_config.get("contact", "").strip()
+        if contact:
+            threading.Thread(
+                target=_wa_notifier.ensure_ready,
+                daemon=True,
+                name="WA-EnsureReady"
+            ).start()
+            _emit_ivr("ivr_log", {"msg": "🔔 Verificando WhatsApp para notificaciones…", "level": "info"})
+
     mode = "prueba" if config["is_test"] else "campaña"
     return jsonify({"ok": True, "msg": f"{mode.capitalize()} iniciada", "total": len(numbers)})
 
@@ -1355,12 +1589,34 @@ def ivr_start():
 @app.route("/ivr/stop", methods=["POST"])
 def ivr_stop():
     """Detiene la campaña activa."""
-    global _ivr_campaign
+    global _ivr_campaign, _adb_watchdog
     with _ivr_lock:
         if not _ivr_campaign or not _ivr_campaign.is_running:
             return jsonify({"ok": False, "error": "No hay campaña activa"}), 409
         _ivr_campaign.stop()
+    # Detener watchdog ADB también
+    if _adb_watchdog and _adb_watchdog.is_alive():
+        _adb_watchdog.stop()
+        _adb_watchdog = None
     return jsonify({"ok": True, "msg": "Campaña detenida"})
+
+
+@app.route("/ivr/adb/status")
+def ivr_adb_status():
+    """Verifica en tiempo real si el dispositivo ADB sigue conectado."""
+    device_id = request.args.get("device_id", "").strip()
+    if not device_id:
+        return jsonify({"connected": False, "error": "Sin device_id"})
+    try:
+        r = subprocess.run(
+            ["adb", "-s", device_id, "get-state"],
+            capture_output=True, text=True, timeout=5
+        )
+        connected = r.returncode == 0 and "device" in r.stdout
+        return jsonify({"connected": connected, "device_id": device_id})
+    except Exception as exc:
+        return jsonify({"connected": False, "device_id": device_id, "error": str(exc)})
+
 
 
 @app.route("/ivr/status")

@@ -284,6 +284,33 @@
     ::-webkit-scrollbar { width: 5px; }
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 3px; }
+
+    /* ── WhatsApp toggle switch ── */
+    .wa-toggle { position: relative; display: inline-block; width: 36px; height: 20px; cursor: pointer; flex-shrink:0; }
+    .wa-toggle input { opacity: 0; width: 0; height: 0; }
+    .wa-slider {
+      position: absolute; inset: 0;
+      background: rgba(255,255,255,0.1);
+      border-radius: 20px;
+      transition: background .25s;
+      border: 1px solid rgba(255,255,255,0.12);
+    }
+    .wa-slider::before {
+      content: '';
+      position: absolute;
+      width: 14px; height: 14px;
+      left: 2px; top: 2px;
+      background: #64748b;
+      border-radius: 50%;
+      transition: transform .25s, background .25s;
+    }
+    .wa-toggle input:checked + .wa-slider { background: rgba(37,211,102,.25); border-color: #25d366; }
+    .wa-toggle input:checked + .wa-slider::before { transform: translateX(16px); background: #25d366; }
+
+    /* WA status dot colors */
+    .dot.wa-ready { background: #25d366; box-shadow: 0 0 6px #25d366; }
+    .dot.wa-open  { background: #fbbf24; box-shadow: 0 0 6px #fbbf24; }
+    .dot.wa-err   { background: #f87171; }
   </style>
 </head>
 <body style="background:#0f1729;color:#e2e8f0;font-family:Inter,sans-serif;">
@@ -322,6 +349,10 @@
         <div class="frow">
           <select class="fsel" id="ivr-device"><option value="">— Seleccionar —</option></select>
           <button class="xbtn xg" id="ivr-refresh-devices" title="Refrescar">&#x1F504;</button>
+        </div>
+        <div class="frow" style="gap:5px;margin-top:3px">
+          <span class="dot" id="adb-status-dot"></span>
+          <span id="adb-status-txt" style="font-size:10px;color:#64748b">Sin dispositivo seleccionado</span>
         </div>
       </div>
 
@@ -397,6 +428,53 @@
           <input class="finp" type="number" id="ivr-tone-timeout" value="10" min="3" max="60" />
         </div>
       </div>
+
+      <!-- ── NOTIFICACIONES WHATSAPP ── -->
+      <div style="border-top:1px solid rgba(255,255,255,0.07);margin:8px 0 4px;"></div>
+      <div class="fld" id="wa-section">
+
+        <!-- Cabecera con toggle -->
+        <div class="frow" style="justify-content:space-between;align-items:center;margin-bottom:4px">
+          <label class="flbl" style="color:#25d366;font-size:11px">&#x1F4AC; Notif. WhatsApp</label>
+          <label class="wa-toggle" id="wa-toggle-wrap" title="Activar/desactivar notificaciones">
+            <input type="checkbox" id="wa-enabled" />
+            <span class="wa-slider"></span>
+          </label>
+        </div>
+
+        <!-- Campos (siempre visibles para poder configurar) -->
+        <div id="wa-fields">
+          <div class="fld" style="margin-bottom:4px">
+            <label class="flbl" style="font-size:9px">Grupo o número destino</label>
+            <input class="finp" type="text" id="wa-contact"
+                   placeholder="Grupo IVR o +57300..." style="width:100%;box-sizing:border-box" />
+          </div>
+          <div class="fld" style="margin-bottom:6px">
+            <label class="flbl" style="font-size:9px">Número respaldo (opcional)</label>
+            <input class="finp" type="text" id="wa-backup"
+                   placeholder="+57300..." style="width:100%;box-sizing:border-box" />
+          </div>
+
+          <!-- Botón abrir Chrome + cerrar -->
+          <div class="frow" style="gap:5px">
+            <button class="xbtn" id="wa-open-browser"
+                    style="background:linear-gradient(135deg,#25d366,#128c7e);color:#fff;flex:1;justify-content:center;font-size:11px">
+              &#x1F310; Abrir WhatsApp
+            </button>
+            <button class="xbtn xr" id="wa-close-browser"
+                    style="padding:5px 8px;font-size:11px" title="Cerrar navegador">&#x2715;</button>
+          </div>
+
+          <!-- Estado del browser -->
+          <div class="frow" style="gap:6px;margin-top:5px;align-items:center">
+            <span class="dot" id="wa-status-dot"></span>
+            <span id="wa-status-txt" style="font-size:11px;color:#64748b">Navegador cerrado</span>
+            <span id="wa-queue-badge" hidden
+                  style="background:rgba(37,211,102,.18);color:#25d366;border-radius:4px;font-size:10px;padding:1px 6px"></span>
+          </div>
+        </div><!-- /wa-fields -->
+
+      </div><!-- /wa-section -->
 
     </div><!-- /scroll -->
 
