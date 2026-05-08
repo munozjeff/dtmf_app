@@ -868,12 +868,14 @@ class IVRCampaign(threading.Thread):
         self.processed     = 0
         self.device_id     = config.get("device_id")
         self.delay_s       = float(config.get("delay_seconds", 5))
-        self.audio_initial = config.get("audio_initial")    # ruta absoluta
-        self.audio_middle  = config.get("audio_middle")     # ruta absoluta
-        self.audio_bye     = config.get("audio_bye")        # ruta absoluta
-        self.ivr_options   = config.get("ivr_options", {})  # {"1": "Interesado", ...}
-        self.tone_timeout  = float(config.get("tone_timeout", 10))
-        self.is_test       = config.get("is_test", False)
+        self.audio_welcome  = config.get("audio_welcome")   # bienvenida — se reproduce UNA vez
+        self.audio_menu     = config.get("audio_menu")      # menú IVR — se repite N veces
+        self.audio_bye      = config.get("audio_bye")       # despedida global (fallback por opción)
+        self.audio_no_tone  = config.get("audio_no_tone")   # audio al agotar intentos sin tono
+        self.ivr_options    = config.get("ivr_options", {}) # {"1": "Interesado", ...}
+        self.tone_timeout   = float(config.get("tone_timeout", 10))
+        self.menu_repeats   = int(config.get("menu_repeats", 2))  # veces que se repite el menú IVR
+        self.is_test        = config.get("is_test", False)
 
         self._stop_event   = threading.Event()
         self._pause_event  = threading.Event()
@@ -1058,26 +1060,47 @@ class IVRCampaign(threading.Thread):
         self._digit_event.clear()
         self._last_digit = None
 
-        # ── Audio inicial ────────────────────────────────────────────
-        _emit_ivr("ivr_log", {"msg": "  Reproduciendo audio inicial", "level": "info"})
-        _play_audio(self.audio_initial, cancel_event=disconnect_event)
+        # ══ 1. BIENVENIDA — se reproduce UNA sola vez ═══════════════════
+        _emit_ivr("ivr_log", {"msg": "  🎙️ Reproduciendo bienvenida...", "level": "info"})
+        _play_audio(self.audio_welcome, cancel_event=disconnect_event)
 
         if _caller_gone():
             stop_audio_monitor()
             if disconnect_event and disconnect_event.is_set():
-                _emit_ivr("ivr_log", {"msg": "  📵 Cliente colgó durante el audio inicial", "level": "warn"})
+                _emit_ivr("ivr_log", {"msg": "  📵 Cliente colgó durante la bienvenida", "level": "warn"})
                 return "DISCONNECTED_DURING_CALL", None
             return "STOPPED", None
 
-        # Barge-in: si ya se detectó algo durante el audio, notificar pero
-        # solo cuenta si es un tono válido (se evalúa abajo)
+        # ══ 2. MENÚ IVR — se repite menu_repeats veces ══════════════════
+        # Barge-in: si ya detectó algo durante la bienvenida, evaluamos abajo
         if self._digit_event.is_set():
-            _emit_ivr("ivr_log", {"msg": "  (Señal detectada durante el audio — evaluando...)", "level": "info"})
+            _emit_ivr("ivr_log", {"msg": "  (Señal detectada durante la bienvenida — evaluando...)", "level": "info"})
 
-        # ── Bucles de espera de tono ──────────────────────────────────
-        for attempt in range(2):
+        for attempt in range(self.menu_repeats):
+            # ── Verificar antes de reproducir el menú ──────────────────
+            if _caller_gone():
+                stop_audio_monitor()
+                if disconnect_event and disconnect_event.is_set():
+                    _emit_ivr("ivr_log", {"msg": "  📵 Cliente colgó antes del menú IVR", "level": "warn"})
+                    return "DISCONNECTED_DURING_CALL", None
+                return "STOPPED", None
+
+            _emit_ivr("ivr_log", {
+                "msg": f"  📋 Reproduciendo menú IVR (intento {attempt + 1}/{self.menu_repeats})...",
+                "level": "info"
+            })
+            _play_audio(self.audio_menu, cancel_event=disconnect_event)
+
+            if _caller_gone():
+                stop_audio_monitor()
+                if disconnect_event and disconnect_event.is_set():
+                    _emit_ivr("ivr_log", {"msg": "  📵 Cliente colgó durante el menú IVR", "level": "warn"})
+                    return "DISCONNECTED_DURING_CALL", None
+                return "STOPPED", None
+
+            # ── Esperar tono DTMF ───────────────────────────────────────
             deadline = time.time() + self.tone_timeout
-            _emit_ivr("ivr_log", {"msg": f"  Esperando tono válido ({self.tone_timeout}s)...", "level": "info"})
+            _emit_ivr("ivr_log", {"msg": f"  ⏳ Esperando tono válido ({self.tone_timeout}s)...", "level": "info"})
 
             digit = None
             while time.time() < deadline:
@@ -1089,7 +1112,6 @@ class IVRCampaign(threading.Thread):
                         return "DISCONNECTED_DURING_CALL", None
                     return "STOPPED", None
 
-                # Esperar el próximo evento con el tiempo restante
                 remaining = max(0.1, deadline - time.time())
                 self._digit_event.wait(timeout=remaining)
                 self._digit_event.clear()
@@ -1098,19 +1120,19 @@ class IVRCampaign(threading.Thread):
                 self._last_digit = None
 
                 if not candidate:
-                    continue   # silencio o ruido
+                    continue
 
                 if candidate in self.ivr_options:
                     digit = candidate
-                    break      # tono válido encontrado
+                    break
                 else:
-                    # Ignorar y seguir esperando
                     _emit_ivr("ivr_log", {
                         "msg": f"  Tono '{candidate}' no configurado — ignorando",
                         "level": "info"
                     })
 
             if digit:
+                # ── Tono válido detectado ───────────────────────────────
                 option_data = self.ivr_options[digit]
                 if isinstance(option_data, dict):
                     desc      = option_data.get("desc", digit)
@@ -1126,27 +1148,13 @@ class IVRCampaign(threading.Thread):
                 stop_audio_monitor()
                 return "ANSWERED_TONE", digit
 
-            # Timeout sin tono válido
-            if attempt == 0 and self.audio_middle:
-                # Verificar antes de reproducir el mensaje intermedio
-                if _caller_gone():
-                    stop_audio_monitor()
-                    if disconnect_event and disconnect_event.is_set():
-                        _emit_ivr("ivr_log", {"msg": "  📵 Cliente colgó antes del mensaje intermedio", "level": "warn"})
-                        return "DISCONNECTED_DURING_CALL", None
-                    return "STOPPED", None
+            # Timeout sin tono — continuar al siguiente intento del menú
 
-                _emit_ivr("ivr_log", {"msg": "  Sin respuesta — reproduciendo mensaje intermedio", "level": "info"})
-                _play_audio(self.audio_middle, cancel_event=disconnect_event)
-
-                if _caller_gone():
-                    stop_audio_monitor()
-                    if disconnect_event and disconnect_event.is_set():
-                        _emit_ivr("ivr_log", {"msg": "  📵 Cliente colgó durante el mensaje intermedio", "level": "warn"})
-                        return "DISCONNECTED_DURING_CALL", None
-                    return "STOPPED", None
-
-        _emit_ivr("ivr_log", {"msg": "  Sin tono valido - colgando", "level": "warn"})
+        # ══ 3. SIN TONO — agotados todos los intentos ═══════════════════
+        _emit_ivr("ivr_log", {"msg": "  ⚠️ Sin tono detectado en todos los intentos", "level": "warn"})
+        if self.audio_no_tone:
+            _emit_ivr("ivr_log", {"msg": "  🔔 Reproduciendo audio de cierre (sin tono)...", "level": "info"})
+            _play_audio(self.audio_no_tone, cancel_event=disconnect_event)
         self._hang_up()
         stop_audio_monitor()
         return "ANSWERED_NO_TONE", None
@@ -1603,15 +1611,17 @@ def ivr_start():
         _audio_output_device_name = None
 
     config = {
-        "numbers":       numbers,
-        "device_id":     data.get("device_id"),
-        "delay_seconds": data.get("delay_seconds", 5),
-        "audio_initial": data.get("audio_initial"),
-        "audio_middle":  data.get("audio_middle"),
-        "audio_bye":     data.get("audio_bye"),
-        "ivr_options":   data.get("ivr_options", {}),
-        "tone_timeout":  data.get("tone_timeout", 10),
-        "is_test":       data.get("is_test", False),
+        "numbers":        numbers,
+        "device_id":      data.get("device_id"),
+        "delay_seconds":  data.get("delay_seconds", 5),
+        "audio_welcome":  data.get("audio_welcome"),   # bienvenida — una vez
+        "audio_menu":     data.get("audio_menu"),      # menú IVR — repetido N veces
+        "audio_bye":      data.get("audio_bye"),       # despedida global (fallback)
+        "audio_no_tone":  data.get("audio_no_tone"),   # audio al agotar intentos sin tono
+        "ivr_options":    data.get("ivr_options", {}),
+        "tone_timeout":   data.get("tone_timeout", 10),
+        "menu_repeats":   data.get("menu_repeats", 2),
+        "is_test":        data.get("is_test", False),
     }
 
     with _ivr_lock:

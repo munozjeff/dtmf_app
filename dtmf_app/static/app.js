@@ -323,7 +323,7 @@ function endCampaign() {
   });
 
   // ── Audios ──
-  const audioPaths = { initial: null, middle: null };
+  const audioPaths = { welcome: null, menu: null, no_tone: null };
   async function uploadAudio(file, type) {
     addLog("⏳ Subiendo audio " + type + "...", "info");
     const fd = new FormData(); fd.append("file", file); fd.append("type", type);
@@ -334,15 +334,23 @@ function endCampaign() {
       else addLog("❌ " + (d.error || "Error subiendo audio"), "err");
     } catch(e) { addLog("❌ Red: " + e.message, "err"); }
   }
-  E("ivr-audio-initial-input")?.addEventListener("change", e => {
+  // Bienvenida
+  E("ivr-audio-welcome-input")?.addEventListener("change", e => {
     const f = e.target.files[0]; if (!f) return;
-    const nm = E("ivr-audio-initial-name"); if (nm) nm.textContent = f.name;
-    uploadAudio(f, "initial");
+    const nm = E("ivr-audio-welcome-name"); if (nm) nm.textContent = f.name;
+    uploadAudio(f, "welcome");
   });
-  E("ivr-audio-middle-input")?.addEventListener("change", e => {
+  // Menú IVR
+  E("ivr-audio-menu-input")?.addEventListener("change", e => {
     const f = e.target.files[0]; if (!f) return;
-    const nm = E("ivr-audio-middle-name"); if (nm) nm.textContent = f.name;
-    uploadAudio(f, "middle");
+    const nm = E("ivr-audio-menu-name"); if (nm) nm.textContent = f.name;
+    uploadAudio(f, "menu");
+  });
+  // Sin tono (opcional)
+  E("ivr-audio-notone-input")?.addEventListener("change", e => {
+    const f = e.target.files[0]; if (!f) return;
+    const nm = E("ivr-audio-notone-name"); if (nm) nm.textContent = f.name;
+    uploadAudio(f, "no_tone");
   });
 
   // ── Opciones IVR (con audio de despedida por opcion) ──
@@ -417,12 +425,14 @@ function endCampaign() {
     const config = {
       numbers,
       device_id:           devSel.value,
-      audio_device:        audioInIndex,    // micrófono de entrada
-      audio_output_device: audioOutIndex,   // altavoz de salida
+      audio_device:        audioInIndex,
+      audio_output_device: audioOutIndex,
       delay_seconds:  parseInt(E("ivr-delay")?.value) || 5,
       tone_timeout:   parseInt(E("ivr-tone-timeout")?.value) || 10,
-      audio_initial:  audioPaths.initial,
-      audio_middle:   audioPaths.middle,
+      menu_repeats:   parseInt(E("ivr-menu-repeats")?.value) || 2,
+      audio_welcome:  audioPaths.welcome,
+      audio_menu:     audioPaths.menu,
+      audio_no_tone:  audioPaths.no_tone,
       ivr_options:    {},
       is_test:        isTest
     };

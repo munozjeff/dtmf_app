@@ -389,24 +389,37 @@
         <span class="fbadge" id="ivr-numbers-badge" hidden><span id="ivr-numbers-count"></span></span>
       </div>
 
-      <!-- Audio inicial -->
+      <!-- Audio Bienvenida -->
       <div class="fld">
-        <label class="flbl">Audio inicial</label>
+        <label class="flbl">&#x1F399;&#xFE0F; Bienvenida / Saludo</label>
         <div class="frow">
-          <label class="xbtn xg" for="ivr-audio-initial-input">&#x1F3B5;</label>
-          <input type="file" id="ivr-audio-initial-input" accept="audio/*,video/*" hidden />
-          <span class="fname" id="ivr-audio-initial-name">Sin archivo</span>
+          <label class="xbtn xg" for="ivr-audio-welcome-input">&#x1F3B5;</label>
+          <input type="file" id="ivr-audio-welcome-input" accept="audio/*,video/*" hidden />
+          <span class="fname" id="ivr-audio-welcome-name">Sin archivo</span>
         </div>
+        <span class="flbl" style="text-transform:none;letter-spacing:0;color:#475569">Se reproduce una sola vez al contestar</span>
       </div>
 
-      <!-- Audio intermedio -->
+      <!-- Audio Menu IVR -->
       <div class="fld">
-        <label class="flbl">Audio intermedio</label>
+        <label class="flbl">&#x1F4CB; Men&#xFA; IVR</label>
         <div class="frow">
-          <label class="xbtn xg" for="ivr-audio-middle-input">&#x1F3B5;</label>
-          <input type="file" id="ivr-audio-middle-input" accept="audio/*,video/*" hidden />
-          <span class="fname" id="ivr-audio-middle-name">Sin archivo</span>
+          <label class="xbtn xg" for="ivr-audio-menu-input">&#x1F3B5;</label>
+          <input type="file" id="ivr-audio-menu-input" accept="audio/*,video/*" hidden />
+          <span class="fname" id="ivr-audio-menu-name">Sin archivo</span>
         </div>
+        <span class="flbl" style="text-transform:none;letter-spacing:0;color:#475569">Se repite N veces presentando las opciones</span>
+      </div>
+
+      <!-- Audio Sin Tono -->
+      <div class="fld">
+        <label class="flbl">&#x1F515; Audio sin respuesta</label>
+        <div class="frow">
+          <label class="xbtn xg" for="ivr-audio-notone-input">&#x1F3B5;</label>
+          <input type="file" id="ivr-audio-notone-input" accept="audio/*,video/*" hidden />
+          <span class="fname" id="ivr-audio-notone-name">Sin archivo (opcional)</span>
+        </div>
+        <span class="flbl" style="text-transform:none;letter-spacing:0;color:#475569">Se reproduce si el cliente no presion&#xF3; nada</span>
       </div>
 
       <!-- Opciones IVR -->
@@ -418,7 +431,7 @@
         <div class="opt-list" id="ivr-options-list"></div>
       </div>
 
-      <!-- Tiempos -->
+      <!-- Tiempos + Repeticiones -->
       <div class="frow" style="gap:8px">
         <div class="fld" style="flex:1">
           <label class="flbl">Delay (s)</label>
@@ -427,6 +440,10 @@
         <div class="fld" style="flex:1">
           <label class="flbl">Espera tono (s)</label>
           <input class="finp" type="number" id="ivr-tone-timeout" value="10" min="3" max="60" />
+        </div>
+        <div class="fld" style="flex:1">
+          <label class="flbl">Rep. men&#xFA;</label>
+          <input class="finp" type="number" id="ivr-menu-repeats" value="2" min="1" max="10" title="Veces que se repite el menú IVR si no hay respuesta" />
         </div>
       </div>
 
