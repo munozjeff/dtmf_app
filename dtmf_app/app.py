@@ -957,27 +957,36 @@ class IVRCampaign(threading.Thread):
             return
 
         # — 2. Monitorear estado —————————————————————————————
-        call_stop          = threading.Event()
-        call_disconnected  = threading.Event()   # ← se activa si el cliente cuelga EN CUALQUIER momento
-        call_state         = {"current": "CONNECTING"}
+        # call_stop:        desbloquea el bucle de espera inicial (ACTIVE o DISCONNECTED temprano)
+        # monitor_stop:     detiene el hilo logcat — SOLO al final del flujo completo
+        # call_disconnected: se activa si el cliente cuelga EN CUALQUIER momento
+        call_stop         = threading.Event()
+        monitor_stop      = threading.Event()   # ← evento INDEPENDIENTE para el CallMonitor
+        call_disconnected = threading.Event()
+        call_state        = {"current": "CONNECTING"}
 
         def on_state(state: str):
             call_state["current"] = state
             _emit_ivr("ivr_status", {"number": number, "state": state})
             _emit_ivr("ivr_log", {"msg": f"  -> Estado: {state}", "level": "info"})
             if state == "ACTIVE":
-                call_stop.set()          # desbloquea el bucle de espera inicial
+                call_stop.set()          # desbloquea el bucle de espera inicial — NO detiene el monitor
             elif state == "DISCONNECTED":
                 call_stop.set()          # desbloquea el bucle de espera inicial
                 call_disconnected.set()  # señala cuelgue a _handle_active()
+                # NO hacemos monitor_stop.set() aquí; el monitor se para al final del flujo
 
         if _MONITOR_OK:
             monitor = CallMonitor(device_id=self.device_id)
-            monitor.start(on_state_change=on_state, stop_event=call_stop, clear_logs=True)
+            # Usamos monitor_stop (no call_stop) para que el monitor siga leyendo
+            # logcat incluso después de entrar a ACTIVE — así detecta el DISCONNECTED
+            # que ocurre cuando el cliente cuelga durante la reproducción de audio.
+            monitor.start(on_state_change=on_state, stop_event=monitor_stop, clear_logs=True)
         else:
             time.sleep(3)
             call_state["current"] = "ACTIVE"
 
+        # Esperar hasta que la llamada entre en ACTIVE o se desconecte (máx 60 s)
         deadline = time.time() + 60
         while not call_stop.is_set() and not self._stop_event.is_set():
             if time.time() > deadline:
@@ -987,15 +996,16 @@ class IVRCampaign(threading.Thread):
         final_state = call_state["current"]
 
         if final_state == "ACTIVE":
-            # Pasamos call_disconnected para que _handle_active() reaccione si el cliente cuelga
+            # El monitor sigue corriendo → puede detectar DISCONNECTED durante _handle_active()
             result_status, result_digit = self._handle_active(number, call_disconnected)
         elif final_state in ("DISCONNECTED", "CONNECTING", "DIALING"):
             result_status = "NO_ANSWER" if final_state != "DISCONNECTED" else "DISCONNECTED"
         else:
             result_status = "UNKNOWN"
 
+        # Ahora sí detenemos el monitor logcat
         if _MONITOR_OK:
-            call_stop.set()
+            monitor_stop.set()
             monitor.stop()
 
         self._hang_up()
