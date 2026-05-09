@@ -1191,12 +1191,19 @@ class IVRCampaign(threading.Thread):
         monitor_stop      = threading.Event()   # ← evento INDEPENDIENTE para el CallMonitor
         call_disconnected = threading.Event()
         call_state        = {"current": "CONNECTING"}
+        # Timestamp en que la llamada entró a DIALING — usado para el discriminador de tiempo
+        # Un número apagado/no disponible pasa a ACTIVE en < 10s desde DIALING
+        # Un número que timbra (incluso al buzón) pasa a ACTIVE en ≥10s
+        dialing_start_time: list = [time.time()]   # lista mutable para acceso desde closure
+        MIN_DIALING_SECS = 10.0   # seg — umbral de tiempo en DIALING para confirmar que timbó
 
         def on_state(state: str):
             call_state["current"] = state
             _emit_ivr("ivr_status", {"number": number, "state": state})
             _emit_ivr("ivr_log", {"msg": f"  -> Estado: {state}", "level": "info"})
-            if state == "ACTIVE":
+            if state == "DIALING":
+                dialing_start_time[0] = time.time()   # registrar inicio de DIALING
+            elif state == "ACTIVE":
                 call_stop.set()          # desbloquea el bucle de espera inicial — NO detiene el monitor
             elif state == "DISCONNECTED":
                 call_stop.set()          # desbloquea el bucle de espera inicial
@@ -1246,14 +1253,29 @@ class IVRCampaign(threading.Thread):
                 "level": "info"
             })
 
-        final_state = call_state["current"]
+        final_state    = call_state["current"]
+        time_in_dialing = time.time() - dialing_start_time[0]   # cuánto tiempo estuvo en DIALING
 
         if final_state == "ACTIVE":
-            if pre_voice and pre_rings <= PreCallAudioAnalyzer.MAX_RINGS:
+            _emit_ivr("ivr_log", {
+                "msg": f"  ⏱️ Tiempo en DIALING: {time_in_dialing:.1f}s",
+                "level": "info"
+            })
+            # Condición UNAVAILABLE:
+            #   1. El analizador detectó voz del operador  Y
+            #   2. Se contaron pocos rings (indicador de audio)  Y
+            #   3. El tiempo en DIALING fue < MIN_DIALING_SECS  ← GUARDIA PRINCIPAL
+            #      (si estuvo ≥10s en DIALING, definitivamente timbó → NO es UNAVAILABLE)
+            is_unavailable = (
+                pre_voice
+                and pre_rings <= PreCallAudioAnalyzer.MAX_RINGS
+                and time_in_dialing < MIN_DIALING_SECS
+            )
+            if is_unavailable:
                 # ⛔ Operador respondió sin dar tiempo a suficientes rings → apagado/sin servicio
                 result_status = "UNAVAILABLE"
                 _emit_ivr("ivr_log", {
-                    "msg": f"  ⛔ Número no disponible — {pre_rings} ring(s) antes del operador",
+                    "msg": f"  ⛔ Número no disponible — {pre_rings} ring(s), {time_in_dialing:.1f}s antes del operador",
                     "level": "warn"
                 })
                 self._hang_up()
