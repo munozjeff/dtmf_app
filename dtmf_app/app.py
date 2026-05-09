@@ -1303,6 +1303,10 @@ class PreCallAudioAnalyzer(threading.Thread):
                     self._update_vad(cls)            # Método 1: espectral
                     self._update_energy_vad(energy)  # Método 2: energía sostenida
 
+                    # ── Alimentar grabador con audio de DIALING ─────────────
+                    if _active_recorder is not None:
+                        _active_recorder.feed(data[:, 0].astype(np.float32) if data.ndim > 1 else data.astype(np.float32), sr_native)
+
                     # ── Visualizador: emitir RMS al canal 'input' (~10 Hz) ──
                     rms = float(np.sqrt(energy))
                     socketio.emit("audio_viz", {"ch": "input", "rms": rms})
@@ -1409,6 +1413,30 @@ class IVRCampaign(threading.Thread):
             "number": number, "status": "CALLING",
             "processed": self.processed, "total": self.total
         })
+
+        # ── 3. Grabación + analizador pre-llamada (desde el primer momento) ─────
+        # La grabación arranca al marcar para capturar ring tones, voz de operador
+        # y toda la llamada desde el primer segundo.
+        recorder = None
+        if self.record_calls and _SD_OK and _audio_monitor_device is not None:
+            ts       = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            safe_num = number.replace("+", "").replace(" ", "")
+            rec_path = os.path.join(IVR_RECORDINGS_DIR, f"{ts}_{safe_num}.wav")
+            recorder = CallRecorder(filepath=rec_path)
+            global _active_recorder
+            _active_recorder = recorder
+            recorder.start()
+            _emit_ivr("ivr_log", {"msg": "  🔴 Grabando desde marcado [estéreo mic+IVR]...", "level": "info"})
+
+        pre_call = None
+        if _SD_OK and _audio_monitor_device is not None:
+            pre_call = PreCallAudioAnalyzer(device_index=_audio_monitor_device)
+            pre_call.start()
+            _emit_ivr("ivr_log", {
+                "msg": "  🔍 Analizando audio pre-llamada (ring/voz)...",
+                "level": "info"
+            })
+
         _emit_ivr("ivr_log", {"msg": f"📞 Marcando: {number}", "level": "info"})
 
         result_status = "NO_ANSWER"
@@ -1462,11 +1490,10 @@ class IVRCampaign(threading.Thread):
             time.sleep(3)
             call_state["current"] = "ACTIVE"
 
-        # — 3. Analizador de audio pre-llamada (durante DIALING) ——————
+        # ─ 3. Analizador de audio pre-llamada (durante DIALING) ──────
         # Detecta ring tones y voz del operador ANTES de que la llamada entre en ACTIVE.
-        # Si hay voz del operador con ≤ MAX_RINGS rings → número apagado/no disponible.
-        pre_call = None
-        if _SD_OK and _audio_monitor_device is not None:
+        # El recorder ya está corriendo — PreCallAnalyzer también alimenta feed() si hay recorder.
+        if _SD_OK and _audio_monitor_device is not None and pre_call is None:
             pre_call = PreCallAudioAnalyzer(device_index=_audio_monitor_device)
             pre_call.start()
             _emit_ivr("ivr_log", {
@@ -1552,7 +1579,7 @@ class IVRCampaign(threading.Thread):
                 self._hang_up()
             else:
                 # El monitor sigue corriendo → puede detectar DISCONNECTED durante _handle_active()
-                result_status, result_digit = self._handle_active(number, call_disconnected)
+                result_status, result_digit = self._handle_active(number, call_disconnected, recorder)
         elif final_state in ("DISCONNECTED", "CONNECTING", "DIALING"):
             result_status = "NO_ANSWER" if final_state != "DISCONNECTED" else "DISCONNECTED"
         else:
@@ -1592,7 +1619,8 @@ class IVRCampaign(threading.Thread):
             _send_whatsapp_notification(number, result_status, result_digit, option_desc)
 
     def _handle_active(self, number: str,
-                        disconnect_event: threading.Event = None) -> tuple[str, str | None]:
+                        disconnect_event: threading.Event = None,
+                        recorder=None) -> tuple[str, str | None]:
         """
         La llamada fue contestada (ACTIVE).
         Reproduce audio inicial, espera tono válido, actúa.
@@ -1617,20 +1645,8 @@ class IVRCampaign(threading.Thread):
         self._digit_event.clear()
         self._last_digit = None
 
-        # ── Grabación de llamada (opcional) ────────────────────────────
-        recorder = None
-        if self.record_calls and _SD_OK and _audio_monitor_device is not None:
-            ts       = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            safe_num = number.replace("+", "").replace(" ", "")
-            rec_path = os.path.join(IVR_RECORDINGS_DIR, f"{ts}_{safe_num}.wav")
-            recorder = CallRecorder(filepath=rec_path)
-            # Conectar el grabador al monitor ANTES de arrancar el monitor
-            # (el monitor se inicia en el try/finally de abajo via start_audio_monitor)
-            global _active_recorder
-            _active_recorder = recorder
-            recorder.start()
-            _emit_ivr("ivr_log", {"msg": "  🔴 Grabando llamada [estéreo mic+IVR]...", "level": "info"})
-
+        # El grabador ya está corriendo desde _process_number (inicio de la llamada).
+        # Aquí solo definimos _stop_recorder() para detenerlo al terminar _handle_active.
         def _stop_recorder():
             """Detiene el grabador y reporta el archivo generado."""
             global _active_recorder
