@@ -1409,6 +1409,7 @@ class IVRCampaign(threading.Thread):
 
     def _process_number(self, number: str):
         """Ejecuta el flujo completo para un número: marcar → monitorear → reaccionar."""
+        global _active_recorder
         _emit_ivr("ivr_call_update", {
             "number": number, "status": "CALLING",
             "processed": self.processed, "total": self.total
@@ -1423,7 +1424,6 @@ class IVRCampaign(threading.Thread):
             safe_num = number.replace("+", "").replace(" ", "")
             rec_path = os.path.join(IVR_RECORDINGS_DIR, f"{ts}_{safe_num}.wav")
             recorder = CallRecorder(filepath=rec_path)
-            global _active_recorder
             _active_recorder = recorder
             recorder.start()
             _emit_ivr("ivr_log", {"msg": "  🔴 Grabando desde marcado [estéreo mic+IVR]...", "level": "info"})
@@ -1596,7 +1596,6 @@ class IVRCampaign(threading.Thread):
         # El recorder inició al marcar → debemos detenerlo siempre, ya sea ACTIVE,
         # UNAVAILABLE, NO_ANSWER o cualquier otro resultado.
         if recorder:
-            global _active_recorder
             _active_recorder = None          # desconectar del monitor ANTES de stop
             recorder.stop()
             recorder.join(timeout=5.0)
