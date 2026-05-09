@@ -34,6 +34,109 @@ ivrSocket.on("input_test_done", ({ peak }) => {
   setTimeout(() => { if (wrap) wrap.style.display = "none"; }, 4000);
 });
 
+// ── Visualizador de audio en tiempo real ─────────────────────
+const _VIZ = (() => {
+  const COLS     = 180;       // número de barras visibles
+  const COLOR_IN  = "#22d3ee";  // cyan — entrada (mic)
+  const COLOR_OUT = "#a78bfa";  // púrpura — salida (IVR)
+  const GLOW_IN   = "rgba(34,211,238,0.35)";
+  const GLOW_OUT  = "rgba(167,139,250,0.35)";
+
+  const state = {
+    in:  { buf: new Float32Array(COLS), db: -Infinity },
+    out: { buf: new Float32Array(COLS), db: -Infinity },
+  };
+
+  function _getCtx(id) {
+    const c = document.getElementById(id);
+    if (!c) return null;
+    // Ajustar resolución al tamaño real
+    const rect = c.getBoundingClientRect();
+    if (c.width !== Math.floor(rect.width) || c.height !== Math.floor(rect.height)) {
+      c.width  = Math.floor(rect.width)  || 400;
+      c.height = Math.floor(rect.height) || 42;
+    }
+    return { ctx: c.getContext("2d"), w: c.width, h: c.height };
+  }
+
+  function _draw(canvasId, buf, color, glow, dbEl, dbVal) {
+    const r = _getCtx(canvasId);
+    if (!r) return;
+    const { ctx, w, h } = r;
+    const barW = Math.max(1, w / COLS);
+
+    ctx.clearRect(0, 0, w, h);
+
+    // Fondo sutil
+    ctx.fillStyle = "rgba(0,0,0,0.2)";
+    ctx.fillRect(0, 0, w, h);
+
+    // Línea de referencia central
+    ctx.strokeStyle = "rgba(255,255,255,0.05)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, h / 2);
+    ctx.lineTo(w, h / 2);
+    ctx.stroke();
+
+    // Barras del waveform
+    ctx.shadowColor  = glow;
+    ctx.shadowBlur   = 6;
+    ctx.fillStyle    = color;
+
+    for (let i = 0; i < COLS; i++) {
+      const amp   = Math.min(1.0, buf[i]);            // 0–1
+      const barH  = Math.max(1, amp * (h * 0.9));
+      const x     = i * barW;
+      const y     = (h - barH) / 2;
+      ctx.fillRect(x, y, Math.max(1, barW - 1), barH);
+    }
+
+    ctx.shadowBlur = 0;
+
+    // Indicador dB
+    if (dbEl) {
+      const db = dbVal > -80 ? dbVal.toFixed(1) + " dB" : "—";
+      dbEl.textContent = db;
+      dbEl.style.color = dbVal > -20 ? "#f87171"
+                       : dbVal > -40 ? "#fbbf24"
+                       : dbVal > -60 ? color
+                       :               "#334155";
+    }
+  }
+
+  function push(ch, rms) {
+    const key  = ch === "input" ? "in" : "out";
+    const s    = state[key];
+    // Scroll: desplaza buffer a la izquierda
+    s.buf.copyWithin(0, 1);
+    s.buf[COLS - 1] = rms;
+    s.db = rms > 1e-9 ? 20 * Math.log10(rms) : -120;
+  }
+
+  let _rafId = null;
+  function _loop() {
+    _draw("viz-canvas-in",  state.in.buf,  COLOR_IN,  GLOW_IN,
+          document.getElementById("viz-db-in"),  state.in.db);
+    _draw("viz-canvas-out", state.out.buf, COLOR_OUT, GLOW_OUT,
+          document.getElementById("viz-db-out"), state.out.db);
+    _rafId = requestAnimationFrame(_loop);
+  }
+
+  return {
+    start() { if (!_rafId) _loop(); },
+    stop()  { if (_rafId) { cancelAnimationFrame(_rafId); _rafId = null; } },
+    push,
+  };
+})();
+
+ivrSocket.on("audio_viz", ({ ch, rms }) => {
+  _VIZ.push(ch, rms);
+});
+
+// Arrancar el render loop siempre (muestra silencio cuando no hay señal)
+window.addEventListener("load", () => _VIZ.start());
+
 // ── Log ───────────────────────────────────────────────────────
 function addLog(msg, cls) {
   const el = document.getElementById("ivr-log"); if (!el) return;

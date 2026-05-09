@@ -168,6 +168,48 @@
       scrollbar-color: rgba(255,255,255,0.1) transparent;
     }
     .log-line { word-break: break-word; }
+
+    /* Audio Visualizer */
+    .viz-panel {
+      flex-shrink: 0;
+      background: #060d1a;
+      border-bottom: 1px solid rgba(255,255,255,0.07);
+      padding: 6px 12px 8px;
+    }
+    .viz-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 5px;
+    }
+    .viz-row:last-child { margin-bottom: 0; }
+    .viz-label {
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      width: 52px;
+      flex-shrink: 0;
+      color: #475569;
+    }
+    .viz-label.in  { color: #22d3ee; }
+    .viz-label.out { color: #a78bfa; }
+    .viz-canvas {
+      flex: 1;
+      height: 42px;
+      border-radius: 4px;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(255,255,255,0.06);
+      display: block;
+    }
+    .viz-db {
+      font-size: 9px;
+      font-family: 'JetBrains Mono', monospace;
+      color: #475569;
+      width: 38px;
+      text-align: right;
+      flex-shrink: 0;
+    }
     .log-line.ok   { color: #4ade80; }
     .log-line.err  { color: #f87171; }
     .log-line.warn { color: #fbbf24; }
@@ -548,6 +590,20 @@
             <thead><tr><th>#</th><th>Numero</th><th>Estado</th><th>Tono</th></tr></thead>
             <tbody id="ivr-queue-tbody"></tbody>
           </table>
+        </div>
+      </div>
+
+      <!-- Visualizador de audio en tiempo real -->
+      <div class="viz-panel" id="viz-panel">
+        <div class="viz-row">
+          <span class="viz-label in">&#x1F3A4;&nbsp;Entrada</span>
+          <canvas class="viz-canvas" id="viz-canvas-in"></canvas>
+          <span class="viz-db" id="viz-db-in">&mdash;</span>
+        </div>
+        <div class="viz-row">
+          <span class="viz-label out">&#x1F50A;&nbsp;Salida</span>
+          <canvas class="viz-canvas" id="viz-canvas-out"></canvas>
+          <span class="viz-db" id="viz-db-out">&mdash;</span>
         </div>
       </div>
 

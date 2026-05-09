@@ -1233,6 +1233,10 @@ class PreCallAudioAnalyzer(threading.Thread):
                     self._update_ring_state(cls, now)
                     self._update_vad(cls)
 
+                    # ── Visualizador: emitir RMS al canal 'input' (~10 Hz) ──
+                    rms = float(np.sqrt(energy))
+                    socketio.emit("audio_viz", {"ch": "input", "rms": rms})
+
         except Exception as exc:
             print(f"[PreCall] Error en captura: {exc}")
 
@@ -1712,6 +1716,8 @@ class PythonAudioMonitor(threading.Thread):
         self._buf: list[float] = []
         self._last_digit: str | None = None
         self._last_emit = 0.0
+        self._viz_acc   = 0.0   # acumulador RMS para audio_viz
+        self._viz_n     = 0     # frames acumulados
 
     def run(self):
         if not _SD_OK:
@@ -1735,6 +1741,15 @@ class PythonAudioMonitor(threading.Thread):
                 raise sd.CallbackStop()
 
             chunk = indata[:, 0].astype(np.float32)
+
+            # ── Visualizador: emitir RMS nativo ~15 Hz ────────────────────
+            rms_raw = float(np.sqrt(np.mean(chunk ** 2)))
+            self._viz_acc += rms_raw
+            self._viz_n   += 1
+            if self._viz_n >= 3:   # ~15 Hz si blocksize=40ms
+                socketio.emit("audio_viz", {"ch": "input", "rms": self._viz_acc / self._viz_n})
+                self._viz_acc = 0.0
+                self._viz_n   = 0
 
             # Alimentar al grabador activo con audio NATIVO (antes de resamplear)
             if _active_recorder is not None:
@@ -1802,20 +1817,78 @@ class PythonAudioMonitor(threading.Thread):
         self._stop_ev.set()
 
 
+# ══════════════════════════════════════════════
+#  LOOPBACK ENERGY MONITOR — visualizador canal de SALIDA
+# ══════════════════════════════════════════════
+
+class LoopbackEnergyMonitor(threading.Thread):
+    """
+    Captura el audio reproducido por el sistema (WASAPI loopback) y emite
+    eventos 'audio_viz' con ch='output' para el visualizador de la UI.
+    """
+    def __init__(self, device_index):
+        super().__init__(daemon=True, name="LoopbackViz")
+        self.device_index = device_index
+        self._stop_ev     = threading.Event()
+
+    def stop(self):
+        self._stop_ev.set()
+
+    def run(self):
+        if not _SD_OK or self.device_index is None:
+            return
+        try:
+            out_info = sd.query_devices(self.device_index, "output")
+            sr_out   = int(out_info["default_samplerate"])
+            bs       = int(sr_out * 0.04)   # bloques de 40 ms
+            wasapi   = sd.WasapiSettings(loopback=True)
+            acc, n   = 0.0, 0
+            with sd.InputStream(
+                device        = self.device_index,
+                channels      = 1,
+                samplerate    = sr_out,
+                blocksize     = bs,
+                dtype         = "float32",
+                extra_settings= wasapi,
+            ) as stream:
+                while not self._stop_ev.is_set():
+                    data, _ = stream.read(bs)
+                    rms  = float(np.sqrt(np.mean(data ** 2)))
+                    acc += rms
+                    n   += 1
+                    if n >= 3:   # ~15 Hz
+                        socketio.emit("audio_viz", {"ch": "output", "rms": acc / n})
+                        acc, n = 0.0, 0
+        except Exception as exc:
+            print(f"[LoopbackViz] {exc}")
+
+
+_loopback_viz: LoopbackEnergyMonitor | None = None
+
+
 def start_audio_monitor(device_index=None):
-    global _audio_monitor_thread
+    global _audio_monitor_thread, _loopback_viz
     if _audio_monitor_thread and _audio_monitor_thread.is_alive():
         _audio_monitor_thread.stop()
         _audio_monitor_thread.join(timeout=2)
     _audio_monitor_thread = PythonAudioMonitor(device_index)
     _audio_monitor_thread.start()
+    # Iniciar visualizador de salida (loopback) si hay dispositivo configurado
+    if _audio_output_device_index is not None:
+        if _loopback_viz and _loopback_viz.is_alive():
+            _loopback_viz.stop()
+        _loopback_viz = LoopbackEnergyMonitor(_audio_output_device_index)
+        _loopback_viz.start()
 
 
 def stop_audio_monitor():
-    global _audio_monitor_thread
+    global _audio_monitor_thread, _loopback_viz
     if _audio_monitor_thread:
         _audio_monitor_thread.stop()
         _audio_monitor_thread = None
+    if _loopback_viz:
+        _loopback_viz.stop()
+        _loopback_viz = None
 
 
 @app.route("/ivr/audio_devices")
