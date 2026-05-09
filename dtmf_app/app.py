@@ -916,8 +916,8 @@ class CallRecorder(threading.Thread):
     Canal IZQUIERDO (L) — entrada : micrófono / interfaz USB (voz del cliente/IVR entrante)
     Canal DERECHO   (R) — salida  : audio IVR reproducido (alimentado por _emit_output_viz)
 
-    Ambos canales son resampled a la tasa nativa del dispositivo de entrada.
-    Si no hay audio de salida, el canal R queda en silencio (0).
+    El alineamiento temporal es exacto: el canal R se desplaza con el tiempo real
+    en el que el IVR empezó a reproducir audio, no desde el inicio de la grabación.
     Tamaño aproximado: estéreo 44.1 kHz ≈ 10 MB/min.
     """
 
@@ -928,6 +928,8 @@ class CallRecorder(threading.Thread):
         self._in_queue     = _queue.Queue()   # mic → PythonAudioMonitor.callback
         self._out_queue    = _queue.Queue()   # IVR audio → _emit_output_viz
         self._sr_in        = None             # tasa del mic (puesta por feed())
+        self._t0_in        = None             # timestamp del primer chunk de entrada
+        self._t0_out       = None             # timestamp del primer chunk de salida
 
     def stop(self):
         self._stop_ev.set()
@@ -939,6 +941,8 @@ class CallRecorder(threading.Thread):
         """
         if self._sr_in is None:
             self._sr_in = sr
+        if self._t0_in is None:
+            self._t0_in = time.time()     # marca el inicio real de la grabación
         try:
             self._in_queue.put_nowait(chunk.copy())
         except _queue.Full:
@@ -947,8 +951,10 @@ class CallRecorder(threading.Thread):
     def feed_output(self, chunk: np.ndarray, sr: int):
         """
         Audio de SALIDA (IVR reproduciendo) — llamado desde _emit_output_viz.
-        Recibe datos del archivo de audio sincronizados con la reproducción.
+        Recibe datos del archivo de audio sincronizados con la reproducción real.
         """
+        if self._t0_out is None:
+            self._t0_out = time.time()    # marca cuándo empezó a reproducirse el audio
         try:
             self._out_queue.put_nowait((chunk.copy(), sr))
         except _queue.Full:
@@ -1013,14 +1019,36 @@ class CallRecorder(threading.Thread):
             print("[Recorder] Sin datos de audio — grabación cancelada")
             return
 
-        # ── Mezclar y guardar WAV estéreo ──────────────────────────
+        # ── Mezclar y guardar WAV estéreo con alineamiento temporal ──
         audio_in = np.concatenate(frames_in).astype(np.float32)
         n_in     = len(audio_in)
 
         if frames_out:
             audio_out = np.concatenate(frames_out).astype(np.float32)
-            # Ajustar longitudes: el canal más corto se rellena con ceros
-            n = max(n_in, len(audio_out))
+
+            # ── ALINEAMIENTO TEMPORAL ──────────────────────────────────
+            # Calcular cuántas muestras de silencio hay que preponer al canal R
+            # para que el audio IVR quede en el instante exacto en que se reprodujo.
+            #
+            #   t0_in  = momento en que llegó el primer chunk de mic (inicio grabación)
+            #   t0_out = momento en que el IVR empezó a reproducir audio
+            #   offset = (t0_out - t0_in) segundos × SR muestras/segundo
+            #
+            offset_samples = 0
+            if self._t0_in is not None and self._t0_out is not None:
+                offset_sec     = max(0.0, self._t0_out - self._t0_in)
+                offset_samples = int(offset_sec * SR)
+                print(f"[Recorder] Offset salida: {offset_sec:.2f}s = {offset_samples} muestras")
+
+            # Preponer silencio al canal R para alinear con el canal L
+            if offset_samples > 0:
+                audio_out = np.concatenate([
+                    np.zeros(offset_samples, dtype=np.float32),
+                    audio_out
+                ])
+
+            # Ajustar longitudes (rellenar con ceros el canal más corto al final)
+            n      = max(n_in, len(audio_out))
             ch_in  = np.pad(audio_in,  (0, n - n_in),           constant_values=0.0)
             ch_out = np.pad(audio_out, (0, n - len(audio_out)), constant_values=0.0)
         else:
@@ -1040,8 +1068,10 @@ class CallRecorder(threading.Thread):
             wf.writeframes(pcm.tobytes())
 
         size_kb = os.path.getsize(self.filepath) / 1024
-        mode    = "estéreo (mic+IVR)" if frames_out else "estéreo (mic+silencio)"
+        mode    = "estéreo (mic+IVR alineado)" if frames_out else "estéreo (mic+silencio)"
         print(f"[Recorder] Guardado: {os.path.basename(self.filepath)} ({size_kb:.0f} KB, {mode} @ {SR} Hz)")
+
+
 
 
 
