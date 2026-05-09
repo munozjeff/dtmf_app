@@ -1026,7 +1026,9 @@ class PreCallAudioAnalyzer(threading.Thread):
     # Voz del operador: debe ser CONTINUA al menos N segundos sin interrupción.
     # Un humano diciendo "Hola?" dura ~0.5-1.5 s y luego hace pausa.
     # Un operador/mensaje grabado habla sin pausas desde el primer segundo.
-    VOICE_SUSTAINED_MIN = 3.0   # segundos consecutivos de voz para declarar operator_voice
+    # Nota: en la ventana post-ACTIVE la audio routing acaba de iniciar
+    # por lo que usamos 2.0s (más alcanzable que 3.0s en una ventana de 4.5s).
+    VOICE_SUSTAINED_MIN = 2.0   # segundos consecutivos de voz para declarar operator_voice
     MAX_RINGS    = 2            # límite de rings para clasificar como UNAVAILABLE
 
     def __init__(self, device_index=None):
@@ -1049,6 +1051,10 @@ class PreCallAudioAnalyzer(threading.Thread):
 
     def stop(self):
         self._stop_ev.set()
+
+    def reset_vad_counter(self):
+        """Reinicia el contador de voz consecutiva (llamar al inicio de la ventana post-ACTIVE)."""
+        self._consecutive_voice_frames = 0
 
     # ── Métodos de análisis espectral ──────────────────────────────
 
@@ -1164,6 +1170,9 @@ class PreCallAudioAnalyzer(threading.Thread):
             self._consecutive_voice_frames = 0
 
         sustained_secs = self._consecutive_voice_frames * self.FRAME_MS / 1000.0
+        # Log de diagnóstico cada segundo para ver qué detecta el analizador
+        if self._consecutive_voice_frames > 0 and self._consecutive_voice_frames % 10 == 0:
+            print(f"[PreCall] Voz consecutiva: {sustained_secs:.1f}s (umbral: {self.VOICE_SUSTAINED_MIN}s)")
         if sustained_secs >= self.VOICE_SUSTAINED_MIN:
             self.operator_voice = True
 
@@ -1404,13 +1413,16 @@ class IVRCampaign(threading.Thread):
         # PreCallAudioAnalyzer hasta POST_ACTIVE_LISTEN seg adicionales post-ACTIVE
         # (con salida anticipada en cuanto detecta voz sostenida).
         # Solo aplica cuando el tiempo en DIALING < MIN_DIALING_SECS (candidato a UNAVAILABLE).
-        POST_ACTIVE_LISTEN = 3.5   # seg máx post-ACTIVE escuchando operador
+        POST_ACTIVE_LISTEN = 4.5   # seg máx post-ACTIVE escuchando operador
         time_in_dialing = time.time() - dialing_start_time[0]
 
         if (pre_call and pre_call.is_alive()
                 and call_state["current"] == "ACTIVE"
                 and time_in_dialing < MIN_DIALING_SECS
                 and not pre_call.operator_voice):
+            # Reiniciar contador VAD: medimos VOZ fresca desde el inicio de ACTIVE
+            # (descartamos lo que haya podido acumularse durante DIALING que era silencio)
+            pre_call.reset_vad_counter()
             _emit_ivr("ivr_log", {
                 "msg": f"  🎧 Escuchando {POST_ACTIVE_LISTEN}s post-ACTIVE para detectar voz de operador...",
                 "level": "info"
@@ -1420,6 +1432,8 @@ class IVRCampaign(threading.Thread):
                    and not pre_call.operator_voice
                    and not self._stop_event.is_set()):
                 time.sleep(0.1)
+            if pre_call.operator_voice:
+                _emit_ivr("ivr_log", {"msg": "  🔔 Voz de operador detectada post-ACTIVE", "level": "warn"})
 
         # Detener analizador pre-llamada y leer resultados
         pre_rings = 0
