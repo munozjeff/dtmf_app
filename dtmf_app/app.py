@@ -915,36 +915,34 @@ class CallRecorder(threading.Thread):
     """
     Graba el audio de una llamada en WAV estéreo a tasa nativa del dispositivo.
 
-    Canal IZQUIERDO (L) — entrada : micrófono / interfaz USB (voz del cliente/IVR entrante)
-    Canal DERECHO   (R) — salida  : audio IVR reproducido (alimentado por _emit_output_viz)
+    Canal IZQUIERDO (L) — entrada : micrófono / interfaz USB (voz entrante)
+    Canal DERECHO   (R) — salida  : audio IVR reproducido (de _emit_output_viz)
 
-    El alineamiento temporal es exacto: el canal R se desplaza con el tiempo real
-    en el que el IVR empezó a reproducir audio, no desde el inicio de la grabación.
+    Cada chunk de salida lleva su propio timestamp absolute — al mezclar se
+    reconstruye la línea de tiempo exacta del canal R, preservando:
+      • El offset inicial (tiempo desde marcado hasta primer audio IVR)
+      • Los silencios entre audios (espera de DTMF, pausas del IVR, etc.)
     Tamaño aproximado: estéreo 44.1 kHz ≈ 10 MB/min.
     """
 
     def __init__(self, filepath: str):
         super().__init__(daemon=True, name="CallRecorder")
-        self.filepath      = filepath
-        self._stop_ev      = threading.Event()
-        self._in_queue     = _queue.Queue()   # mic → PythonAudioMonitor.callback
-        self._out_queue    = _queue.Queue()   # IVR audio → _emit_output_viz
-        self._sr_in        = None             # tasa del mic (puesta por feed())
-        self._t0_in        = None             # timestamp del primer chunk de entrada
-        self._t0_out       = None             # timestamp del primer chunk de salida
+        self.filepath   = filepath
+        self._stop_ev   = threading.Event()
+        self._in_queue  = _queue.Queue()   # (chunk, sr)  — desde mic
+        self._out_queue = _queue.Queue()   # (chunk, t_abs, sr) — desde IVR
+        self._sr_in     = None
+        self._t0_in     = None             # timestamp primer chunk de mic
 
     def stop(self):
         self._stop_ev.set()
 
     def feed(self, chunk: np.ndarray, sr: int):
-        """
-        Audio de ENTRADA (micrófono) — llamado desde PythonAudioMonitor.callback.
-        Recibe chunks nativos antes de resamplear.
-        """
+        """Audio de ENTRADA (micrófono) — desde PythonAudioMonitor o PreCallAnalyzer."""
         if self._sr_in is None:
             self._sr_in = sr
         if self._t0_in is None:
-            self._t0_in = time.time()     # marca el inicio real de la grabación
+            self._t0_in = time.time()
         try:
             self._in_queue.put_nowait(chunk.copy())
         except _queue.Full:
@@ -952,18 +950,18 @@ class CallRecorder(threading.Thread):
 
     def feed_output(self, chunk: np.ndarray, sr: int):
         """
-        Audio de SALIDA (IVR reproduciendo) — llamado desde _emit_output_viz.
-        Recibe datos del archivo de audio sincronizados con la reproducción real.
+        Audio de SALIDA (IVR reproduciendo) — desde _emit_output_viz.
+        Incluye timestamp absoluto para reconstruir la línea de tiempo exacta,
+        preservando los silencios entre archivos IVR.
         """
-        if self._t0_out is None:
-            self._t0_out = time.time()    # marca cuándo empezó a reproducirse el audio
         try:
-            self._out_queue.put_nowait((chunk.copy(), sr))
+            self._out_queue.put_nowait((chunk.copy(), time.time(), sr))
         except _queue.Full:
             pass
 
+    # ──────────────────────────────────────────────────────────────────
     def run(self):
-        # ── Esperar tasa nativa del mic ────────────────────────────
+        # Esperar tasa nativa del mic
         deadline = time.time() + 5.0
         while self._sr_in is None and not self._stop_ev.is_set():
             if time.time() > deadline:
@@ -971,94 +969,90 @@ class CallRecorder(threading.Thread):
                 return
             time.sleep(0.05)
 
-        SR = self._sr_in
-        frames_in:  list[np.ndarray] = []
-        frames_out: list[np.ndarray] = []
+        SR         = self._sr_in
+        frames_in: list[np.ndarray]                 = []
+        frames_out: list[tuple[np.ndarray, float]]  = []  # (chunk_resampled, t_abs)
 
-        # ── Consumir ambas colas hasta que se detenga ──────────────
+        def _consume_out_queue(q):
+            """Vacía la cola de salida resampleando al SR de entrada."""
+            while True:
+                try:
+                    chunk_o, t_abs, sr_o = q.get_nowait()
+                    if sr_o != SR:
+                        g       = gcd(SR, sr_o)
+                        chunk_o = resample_poly(
+                            chunk_o.astype(np.float64), SR // g, sr_o // g
+                        ).astype(np.float32)
+                    frames_out.append((chunk_o, t_abs))
+                except _queue.Empty:
+                    break
+
+        # Consumir ambas colas mientras grabamos
         while not self._stop_ev.is_set():
-            # Cola de entrada (mic)
             try:
                 chunk = self._in_queue.get(timeout=0.05)
                 frames_in.append(chunk)
             except _queue.Empty:
                 pass
+            _consume_out_queue(self._out_queue)
 
-            # Cola de salida (IVR audio) — resamplear al SR del mic
-            while not self._out_queue.empty():
-                try:
-                    chunk_out, sr_out = self._out_queue.get_nowait()
-                    if sr_out != SR:
-                        g         = gcd(SR, sr_out)
-                        chunk_out = resample_poly(
-                            chunk_out.astype(np.float64),
-                            SR // g, sr_out // g
-                        ).astype(np.float32)
-                    frames_out.append(chunk_out)
-                except _queue.Empty:
-                    break
-
-        # Vaciar restos de colas al detenerse
-        for q in (self._in_queue, self._out_queue):
-            while True:
-                try:
-                    item = q.get_nowait()
-                    if q is self._in_queue:
-                        frames_in.append(item)
-                    else:
-                        chunk_out, sr_out = item
-                        if sr_out != SR:
-                            g = gcd(SR, sr_out)
-                            chunk_out = resample_poly(
-                                chunk_out.astype(np.float64),
-                                SR // g, sr_out // g
-                            ).astype(np.float32)
-                        frames_out.append(chunk_out)
-                except _queue.Empty:
-                    break
+        # Vaciar restos al detenerse
+        while True:
+            try:
+                frames_in.append(self._in_queue.get_nowait())
+            except _queue.Empty:
+                break
+        _consume_out_queue(self._out_queue)
 
         if not frames_in:
             print("[Recorder] Sin datos de audio — grabación cancelada")
             return
 
-        # ── Mezclar y guardar WAV estéreo con alineamiento temporal ──
+        # ── Construir canal L (entrada) ────────────────────────────
         audio_in = np.concatenate(frames_in).astype(np.float32)
         n_in     = len(audio_in)
 
-        if frames_out:
-            audio_out = np.concatenate(frames_out).astype(np.float32)
+        # ── Construir canal R (salida) con timeline exacta ─────────
+        if frames_out and self._t0_in is not None:
+            # Determinar la longitud total necesaria para el canal R
+            # = posición más tardía (en muestras) + duración del último chunk
+            max_end = 0
+            positioned: list[tuple[int, np.ndarray]] = []
+            for chunk_o, t_abs in frames_out:
+                t_offset   = max(0.0, t_abs - self._t0_in)   # segundos desde inicio
+                sample_pos = int(t_offset * SR)
+                end_pos    = sample_pos + len(chunk_o)
+                positioned.append((sample_pos, chunk_o))
+                max_end = max(max_end, end_pos)
 
-            # ── ALINEAMIENTO TEMPORAL ──────────────────────────────────
-            # Calcular cuántas muestras de silencio hay que preponer al canal R
-            # para que el audio IVR quede en el instante exacto en que se reprodujo.
-            #
-            #   t0_in  = momento en que llegó el primer chunk de mic (inicio grabación)
-            #   t0_out = momento en que el IVR empezó a reproducir audio
-            #   offset = (t0_out - t0_in) segundos × SR muestras/segundo
-            #
-            offset_samples = 0
-            if self._t0_in is not None and self._t0_out is not None:
-                offset_sec     = max(0.0, self._t0_out - self._t0_in)
-                offset_samples = int(offset_sec * SR)
-                print(f"[Recorder] Offset salida: {offset_sec:.2f}s = {offset_samples} muestras")
+            # Canal R: ceros (silencio) de longitud suficiente
+            n_out    = max(n_in, max_end)
+            ch_out   = np.zeros(n_out, dtype=np.float32)
 
-            # Preponer silencio al canal R para alinear con el canal L
-            if offset_samples > 0:
-                audio_out = np.concatenate([
-                    np.zeros(offset_samples, dtype=np.float32),
-                    audio_out
-                ])
+            # Colocar cada chunk en su posición temporal exacta
+            for sample_pos, chunk_o in positioned:
+                end = sample_pos + len(chunk_o)
+                if end <= len(ch_out):
+                    ch_out[sample_pos:end] += chunk_o
+                else:
+                    # Por si acaso el canal R se excede
+                    ch_out = np.pad(ch_out, (0, end - len(ch_out)))
+                    ch_out[sample_pos:end] += chunk_o
 
-            # Ajustar longitudes (rellenar con ceros el canal más corto al final)
-            n      = max(n_in, len(audio_out))
-            ch_in  = np.pad(audio_in,  (0, n - n_in),           constant_values=0.0)
-            ch_out = np.pad(audio_out, (0, n - len(audio_out)), constant_values=0.0)
+            # Igualar longitudes entre canales L y R
+            n      = max(n_in, len(ch_out))
+            ch_in  = np.pad(audio_in, (0, n - n_in),        constant_values=0.0)
+            ch_out = np.pad(ch_out,   (0, n - len(ch_out)), constant_values=0.0)
+
+            dur_out = len(frames_out)
+            print(f"[Recorder] Timeline salida: {dur_out} chunks posicionados sobre {n/SR:.1f}s")
         else:
             # Sin audio IVR → canal R en silencio
             ch_in  = audio_in
             ch_out = np.zeros_like(audio_in)
 
-        stereo = np.stack([ch_in, ch_out], axis=1)   # shape (N, 2)
+        # ── Escribir WAV estéreo ───────────────────────────────────
+        stereo = np.stack([ch_in, ch_out], axis=1)
         pcm    = np.clip(stereo, -1.0, 1.0)
         pcm    = (pcm * 32767).astype(np.int16)
 
@@ -1070,8 +1064,10 @@ class CallRecorder(threading.Thread):
             wf.writeframes(pcm.tobytes())
 
         size_kb = os.path.getsize(self.filepath) / 1024
-        mode    = "estéreo (mic+IVR alineado)" if frames_out else "estéreo (mic+silencio)"
+        mode    = "estéreo (mic+IVR timeline)" if frames_out else "estéreo (mic+silencio)"
         print(f"[Recorder] Guardado: {os.path.basename(self.filepath)} ({size_kb:.0f} KB, {mode} @ {SR} Hz)")
+
+
 
 
 
