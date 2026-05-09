@@ -120,6 +120,8 @@ DTMF_MAP = {
 }
 ROW_FREQS = [697, 770, 852, 941]
 COL_FREQS = [1209, 1336, 1477, 1633]
+# Mapa inverso: dígito → (f_fila, f_col) para sintetizar tono DTMF limpio en la grabación
+_DTMF_DIGIT_FREQS: dict[str, tuple[int, int]] = {v: k for k, v in DTMF_MAP.items()}
 
 # ──────────────────────────────────────────────────────────────
 # Parametros del pipeline
@@ -1335,7 +1337,15 @@ class PreCallAudioAnalyzer(threading.Thread):
 
                     # ── Alimentar grabador con audio de DIALING ─────────────
                     if _active_recorder is not None:
-                        _active_recorder.feed(data[:, 0].astype(np.float32) if data.ndim > 1 else data.astype(np.float32), sr_native)
+                        raw_ch = data[:, 0].astype(np.float32) if data.ndim > 1 else data.astype(np.float32)
+                        if cls == "ring":
+                            # Sustituir audio crudo por tono puro de 425 Hz (ring tone Colombia)
+                            n  = len(raw_ch)
+                            t  = np.arange(n, dtype=np.float32) / sr_native
+                            synth_ring = (0.45 * np.sin(2.0 * np.pi * 425.0 * t)).astype(np.float32)
+                            _active_recorder.feed(synth_ring, sr_native)
+                        else:
+                            _active_recorder.feed(raw_ch, sr_native)
 
                     # ── Visualizador: emitir RMS al canal 'input' (~10 Hz) ──
                     rms = float(np.sqrt(energy))
@@ -1870,9 +1880,21 @@ class PythonAudioMonitor(threading.Thread):
                 self._viz_acc = 0.0
                 self._viz_n   = 0
 
-            # Alimentar al grabador activo con audio NATIVO (antes de resamplear)
+            # ── Alimentar grabador: sintetizar DTMF si hay dígito activo ──────
+            # Si se está sosteniendo un dígito DTMF, inyectar tono dual limpio
+            # en lugar del audio crudo (que puede tener ruido de línea).
             if _active_recorder is not None:
-                _active_recorder.feed(chunk, sr_native)
+                if self._last_digit and self._last_digit in _DTMF_DIGIT_FREQS:
+                    f_row, f_col = _DTMF_DIGIT_FREQS[self._last_digit]
+                    n_s = len(chunk)
+                    t_s = np.arange(n_s, dtype=np.float32) / sr_native
+                    chunk_rec = (
+                        0.35 * np.sin(2.0 * np.pi * f_row * t_s) +
+                        0.35 * np.sin(2.0 * np.pi * f_col * t_s)
+                    ).astype(np.float32)
+                else:
+                    chunk_rec = chunk
+                _active_recorder.feed(chunk_rec, sr_native)
 
             # Resamplear a 8 kHz para análisis DTMF
             if sr_native != TARGET_SR:
