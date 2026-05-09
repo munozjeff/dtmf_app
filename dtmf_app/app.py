@@ -674,14 +674,55 @@ def _wa_load_config():
     if os.path.isfile(WA_CONFIG_FILE):
         try:
             with open(WA_CONFIG_FILE, "r", encoding="utf-8") as fh:
-                data = json.load(fh)
+        data = json.load(fh)
             _wa_config.update(data)
             print(f"[WA] Config cargada: enabled={_wa_config['enabled']} contact='{_wa_config['contact']}'")
         except Exception as exc:
             print(f"[WA] Error leyendo config: {exc}")
-    # Inicializar instancia del notificador si selenium está disponible
+    # Inicializar instancia del notificador
     if _WA_OK:
         _wa_notifier = WhatsAppIVRNotifier()
+
+
+def _emit_output_viz(path: str, cancel_event: threading.Event = None):
+    """
+    Hilo auxiliar: lee el audio del archivo y emite audio_viz ch='output'
+    a ~15 Hz sincronizado con la duración real del archivo.
+    Se ejecuta en paralelo a pygame.mixer para no bloquear la reproducción.
+    """
+    try:
+        import wave as _wave
+        import struct
+        try:
+            import soundfile as _sf
+            data, sr = _sf.read(path, dtype="float32", always_2d=False)
+            if data.ndim > 1:
+                data = data[:, 0]
+        except Exception:
+            # Fallback: onda sin importar soundfile (solo WAV)
+            try:
+                with _wave.open(path, "rb") as wf:
+                    sr     = wf.getframerate()
+                    n_ch   = wf.getnchannels()
+                    sw     = wf.getsampwidth()
+                    raw    = wf.readframes(wf.getnframes())
+                fmt    = {1: "b", 2: "h", 4: "i"}.get(sw, "h")
+                samps  = struct.unpack(f"{len(raw)//sw}{fmt}", raw)
+                data   = np.array(samps[::n_ch], dtype=np.float32)
+                data  /= float(2 ** (8 * sw - 1))  # normalizar a -1..1
+            except Exception:
+                return   # no podemos leer el archivo, salir sin viz
+
+        block_size = max(1, sr // 15)   # bloque de ~67 ms → ~15 Hz
+        for i in range(0, len(data), block_size):
+            if cancel_event and cancel_event.is_set():
+                break
+            chunk = data[i : i + block_size]
+            rms   = float(np.sqrt(np.mean(chunk ** 2))) if len(chunk) else 0.0
+            socketio.emit("audio_viz", {"ch": "output", "rms": rms})
+            time.sleep(block_size / sr)    # esperar el tiempo real del bloque
+    except Exception as exc:
+        print(f"[OutputViz] {exc}")
 
 
 def _wa_save_config():
@@ -755,9 +796,16 @@ def _play_audio(path: str, cancel_event: threading.Event = None):
 
         pygame.mixer.music.load(path)
         pygame.mixer.music.play()
+
+        # Hilo paralelo: waveform de salida sincronizada con el archivo
+        threading.Thread(
+            target=_emit_output_viz,
+            args=(path, cancel_event),
+            daemon=True, name="OutputViz"
+        ).start()
+
         start = time.time()
         while pygame.mixer.music.get_busy() and (time.time() - start) < 60:
-            # Verificar si el cliente colgó o se solicitó detener la campaña
             if cancel_event and cancel_event.is_set():
                 pygame.mixer.music.stop()
                 print(f"[IVR-Audio] Reproducción cancelada (llamada terminada): {os.path.basename(path)}")
