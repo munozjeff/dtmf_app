@@ -1398,6 +1398,29 @@ class IVRCampaign(threading.Thread):
                 break
             time.sleep(0.2)
 
+        # ── Ventana post-ACTIVE para detectar voz del operador ─────────────────
+        # El audio del teléfono NO se enruta al PC durante DIALING en muchos dispositivos;
+        # solo llega cuando Android reporta ACTIVE. Extendemos la captura del
+        # PreCallAudioAnalyzer hasta POST_ACTIVE_LISTEN seg adicionales post-ACTIVE
+        # (con salida anticipada en cuanto detecta voz sostenida).
+        # Solo aplica cuando el tiempo en DIALING < MIN_DIALING_SECS (candidato a UNAVAILABLE).
+        POST_ACTIVE_LISTEN = 3.5   # seg máx post-ACTIVE escuchando operador
+        time_in_dialing = time.time() - dialing_start_time[0]
+
+        if (pre_call and pre_call.is_alive()
+                and call_state["current"] == "ACTIVE"
+                and time_in_dialing < MIN_DIALING_SECS
+                and not pre_call.operator_voice):
+            _emit_ivr("ivr_log", {
+                "msg": f"  🎧 Escuchando {POST_ACTIVE_LISTEN}s post-ACTIVE para detectar voz de operador...",
+                "level": "info"
+            })
+            post_deadline = time.time() + POST_ACTIVE_LISTEN
+            while (time.time() < post_deadline
+                   and not pre_call.operator_voice
+                   and not self._stop_event.is_set()):
+                time.sleep(0.1)
+
         # Detener analizador pre-llamada y leer resultados
         pre_rings = 0
         pre_voice = False
@@ -1412,8 +1435,9 @@ class IVRCampaign(threading.Thread):
                 "level": "info"
             })
 
-        final_state    = call_state["current"]
-        time_in_dialing = time.time() - dialing_start_time[0]   # cuánto tiempo estuvo en DIALING
+        final_state = call_state["current"]
+        # Nota: time_in_dialing ya fue calculado antes de la ventana post-ACTIVE
+        # y refleja el tiempo real en DIALING (no incluye el tiempo de la ventana de escucha).
 
         if final_state == "ACTIVE":
             _emit_ivr("ivr_log", {
