@@ -720,6 +720,9 @@ def _emit_output_viz(path: str, cancel_event: threading.Event = None):
             chunk = data[i : i + block_size]
             rms   = float(np.sqrt(np.mean(chunk ** 2))) if len(chunk) else 0.0
             socketio.emit("audio_viz", {"ch": "output", "rms": rms})
+            # Alimentar grabador activo con el audio del archivo IVR
+            if _active_recorder is not None and len(chunk) > 0:
+                _active_recorder.feed_output(chunk.astype(np.float32), sr)
             time.sleep(block_size / sr)    # esperar el tiempo real del bloque
     except Exception as exc:
         print(f"[OutputViz] {exc}")
@@ -910,44 +913,49 @@ class CallRecorder(threading.Thread):
     """
     Graba el audio de una llamada en WAV estéreo a tasa nativa del dispositivo.
 
-    El audio de ENTRADA (micrófono) se recibe desde PythonAudioMonitor via una
-    queue interna — el dispositivo NO se abre dos veces.
+    Canal IZQUIERDO (L) — entrada : micrófono / interfaz USB (voz del cliente/IVR entrante)
+    Canal DERECHO   (R) — salida  : audio IVR reproducido (alimentado por _emit_output_viz)
 
-    Canal IZQUIERDO — entrada  : micrófono / interfaz de audio (audio entrante)
-    Canal DERECHO   — salida   : loopback WASAPI (audio IVR reproducido)
-
-    Si el loopback no está disponible → graba mono desde la entrada.
-    Tamaño aproximado: estéreo 44.1 kHz ≈ 10 MB/min | mono ≈ 5 MB/min.
+    Ambos canales son resampled a la tasa nativa del dispositivo de entrada.
+    Si no hay audio de salida, el canal R queda en silencio (0).
+    Tamaño aproximado: estéreo 44.1 kHz ≈ 10 MB/min.
     """
 
-    def __init__(self, output_device, filepath: str):
+    def __init__(self, filepath: str):
         super().__init__(daemon=True, name="CallRecorder")
-        self.output_device = output_device  # índice dispositivo de salida (loopback WASAPI)
         self.filepath      = filepath
         self._stop_ev      = threading.Event()
-        self._in_queue     = _queue.Queue()  # alimentado por PythonAudioMonitor.callback
-        self._sr_in        = None            # tasa nativa del dispositivo — la pone el monitor
+        self._in_queue     = _queue.Queue()   # mic → PythonAudioMonitor.callback
+        self._out_queue    = _queue.Queue()   # IVR audio → _emit_output_viz
+        self._sr_in        = None             # tasa del mic (puesta por feed())
 
     def stop(self):
         self._stop_ev.set()
 
     def feed(self, chunk: np.ndarray, sr: int):
         """
-        Llamado desde el callback de PythonAudioMonitor con cada bloque
-        de audio NATIVO (antes de resamplear) para alimentar la grabación.
+        Audio de ENTRADA (micrófono) — llamado desde PythonAudioMonitor.callback.
+        Recibe chunks nativos antes de resamplear.
         """
         if self._sr_in is None:
             self._sr_in = sr
         try:
             self._in_queue.put_nowait(chunk.copy())
         except _queue.Full:
-            pass   # descartar si la cola está llena (no debería ocurrir)
+            pass
+
+    def feed_output(self, chunk: np.ndarray, sr: int):
+        """
+        Audio de SALIDA (IVR reproduciendo) — llamado desde _emit_output_viz.
+        Recibe datos del archivo de audio sincronizados con la reproducción.
+        """
+        try:
+            self._out_queue.put_nowait((chunk.copy(), sr))
+        except _queue.Full:
+            pass
 
     def run(self):
-        if not _SD_OK:
-            return
-
-        # Esperar a que el monitor nos informe la tasa nativa
+        # ── Esperar tasa nativa del mic ────────────────────────────
         deadline = time.time() + 5.0
         while self._sr_in is None and not self._stop_ev.is_set():
             if time.time() > deadline:
@@ -959,87 +967,83 @@ class CallRecorder(threading.Thread):
         frames_in:  list[np.ndarray] = []
         frames_out: list[np.ndarray] = []
 
-        # ── Hilo de loopback WASAPI (salida IVR) ─────────────────
-        loopback_ok = False
-
-        def _record_loopback():
-            nonlocal loopback_ok
-            try:
-                out_info = sd.query_devices(self.output_device, "output")
-                sr_out   = int(out_info["default_samplerate"])
-                bs_out   = int(sr_out * 0.1)
-                wasapi   = sd.WasapiSettings(loopback=True)
-                with sd.InputStream(
-                    device        = self.output_device,
-                    channels      = 1,
-                    samplerate    = sr_out,
-                    blocksize     = bs_out,
-                    dtype         = "float32",
-                    extra_settings= wasapi,
-                ) as lb_stream:
-                    loopback_ok = True
-                    while not self._stop_ev.is_set():
-                        data, _ = lb_stream.read(bs_out)
-                        chunk   = data[:, 0].astype(np.float32)
-                        if sr_out != SR:
-                            g     = gcd(SR, sr_out)
-                            chunk = resample_poly(chunk, SR // g, sr_out // g).astype(np.float32)
-                        frames_out.append(chunk)
-            except Exception as exc:
-                print(f"[Recorder] Loopback no disponible: {exc}")
-
-        lb_thread = None
-        if self.output_device is not None:
-            lb_thread = threading.Thread(target=_record_loopback, daemon=True)
-            lb_thread.start()
-
-        # ── Consumir audio de la queue (viene de PythonAudioMonitor) ──
+        # ── Consumir ambas colas hasta que se detenga ──────────────
         while not self._stop_ev.is_set():
+            # Cola de entrada (mic)
             try:
-                chunk = self._in_queue.get(timeout=0.2)
+                chunk = self._in_queue.get(timeout=0.05)
                 frames_in.append(chunk)
             except _queue.Empty:
-                continue
+                pass
 
-        # Vaciar lo que quede en la cola al detenerse
-        while not self._in_queue.empty():
-            try:
-                frames_in.append(self._in_queue.get_nowait())
-            except _queue.Empty:
-                break
+            # Cola de salida (IVR audio) — resamplear al SR del mic
+            while not self._out_queue.empty():
+                try:
+                    chunk_out, sr_out = self._out_queue.get_nowait()
+                    if sr_out != SR:
+                        g         = gcd(SR, sr_out)
+                        chunk_out = resample_poly(
+                            chunk_out.astype(np.float64),
+                            SR // g, sr_out // g
+                        ).astype(np.float32)
+                    frames_out.append(chunk_out)
+                except _queue.Empty:
+                    break
 
-        if lb_thread:
-            lb_thread.join(timeout=2.0)
+        # Vaciar restos de colas al detenerse
+        for q in (self._in_queue, self._out_queue):
+            while True:
+                try:
+                    item = q.get_nowait()
+                    if q is self._in_queue:
+                        frames_in.append(item)
+                    else:
+                        chunk_out, sr_out = item
+                        if sr_out != SR:
+                            g = gcd(SR, sr_out)
+                            chunk_out = resample_poly(
+                                chunk_out.astype(np.float64),
+                                SR // g, sr_out // g
+                            ).astype(np.float32)
+                        frames_out.append(chunk_out)
+                except _queue.Empty:
+                    break
 
         if not frames_in:
             print("[Recorder] Sin datos de audio — grabación cancelada")
             return
 
-        # ── Mezclar y guardar ──────────────────────────────────
-        audio_in = np.concatenate(frames_in)
+        # ── Mezclar y guardar WAV estéreo ──────────────────────────
+        audio_in = np.concatenate(frames_in).astype(np.float32)
+        n_in     = len(audio_in)
 
-        if frames_out and loopback_ok:
-            audio_out = np.concatenate(frames_out)
-            n      = min(len(audio_in), len(audio_out))
-            stereo = np.stack([audio_in[:n], audio_out[:n]], axis=1)  # L=mic, R=IVR
-            channels = 2
+        if frames_out:
+            audio_out = np.concatenate(frames_out).astype(np.float32)
+            # Ajustar longitudes: el canal más corto se rellena con ceros
+            n = max(n_in, len(audio_out))
+            ch_in  = np.pad(audio_in,  (0, n - n_in),           constant_values=0.0)
+            ch_out = np.pad(audio_out, (0, n - len(audio_out)), constant_values=0.0)
         else:
-            stereo   = audio_in.reshape(-1, 1)
-            channels = 1
+            # Sin audio IVR → canal R en silencio
+            ch_in  = audio_in
+            ch_out = np.zeros_like(audio_in)
 
-        pcm = np.clip(stereo, -1.0, 1.0)
-        pcm = (pcm * 32767).astype(np.int16)
+        stereo = np.stack([ch_in, ch_out], axis=1)   # shape (N, 2)
+        pcm    = np.clip(stereo, -1.0, 1.0)
+        pcm    = (pcm * 32767).astype(np.int16)
 
         os.makedirs(os.path.dirname(self.filepath), exist_ok=True)
         with _wave.open(self.filepath, "wb") as wf:
-            wf.setnchannels(channels)
+            wf.setnchannels(2)
             wf.setsampwidth(2)
             wf.setframerate(SR)
             wf.writeframes(pcm.tobytes())
 
-        mode    = "estéreo (mic+IVR)" if channels == 2 else "mono"
         size_kb = os.path.getsize(self.filepath) / 1024
+        mode    = "estéreo (mic+IVR)" if frames_out else "estéreo (mic+silencio)"
         print(f"[Recorder] Guardado: {os.path.basename(self.filepath)} ({size_kb:.0f} KB, {mode} @ {SR} Hz)")
+
+
 
 
 # ══════════════════════════════════════════════
@@ -1619,17 +1623,13 @@ class IVRCampaign(threading.Thread):
             ts       = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
             safe_num = number.replace("+", "").replace(" ", "")
             rec_path = os.path.join(IVR_RECORDINGS_DIR, f"{ts}_{safe_num}.wav")
-            recorder = CallRecorder(
-                output_device = _audio_output_device_index,
-                filepath      = rec_path
-            )
+            recorder = CallRecorder(filepath=rec_path)
             # Conectar el grabador al monitor ANTES de arrancar el monitor
             # (el monitor se inicia en el try/finally de abajo via start_audio_monitor)
             global _active_recorder
             _active_recorder = recorder
             recorder.start()
-            mode_lbl = "estéreo (mic+IVR)" if _audio_output_device_index is not None else "mono"
-            _emit_ivr("ivr_log", {"msg": f"  🔴 Grabando llamada [{mode_lbl}]...", "level": "info"})
+            _emit_ivr("ivr_log", {"msg": "  🔴 Grabando llamada [estéreo mic+IVR]...", "level": "info"})
 
         def _stop_recorder():
             """Detiene el grabador y reporta el archivo generado."""
