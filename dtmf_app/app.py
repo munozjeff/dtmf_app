@@ -633,9 +633,11 @@ def on_audio_chunk(data):
 #  IVR AUTOMATOR — Configuración y estado global
 # ══════════════════════════════════════════════
 
-IVR_RESULTS_CSV = os.path.join(os.path.dirname(__file__), "ivr_results.csv")
-IVR_AUDIO_FOLDER = os.path.join(os.path.dirname(__file__), "ivr_audio")
-os.makedirs(IVR_AUDIO_FOLDER, exist_ok=True)
+IVR_RESULTS_CSV    = os.path.join(os.path.dirname(__file__), "ivr_results.csv")
+IVR_AUDIO_FOLDER   = os.path.join(os.path.dirname(__file__), "ivr_audio")
+IVR_RECORDINGS_DIR = os.path.join(os.path.dirname(__file__), "recordings")
+os.makedirs(IVR_AUDIO_FOLDER,   exist_ok=True)
+os.makedirs(IVR_RECORDINGS_DIR, exist_ok=True)
 
 # Estado global de la campaña (singleton)
 _ivr_campaign: "IVRCampaign | None" = None
@@ -844,6 +846,80 @@ class ADBWatchdog(threading.Thread):
                     "msg": "⏸️ Esperando reconexión del dispositivo…",
                     "level": "warn"
                 })
+
+
+# ══════════════════════════════════════════════
+#  CALL RECORDER — WAV 8 kHz / mono / 16-bit
+#  Sin dependencias extra (~1 MB/min de voz)
+# ══════════════════════════════════════════════
+
+import wave as _wave
+
+class CallRecorder(threading.Thread):
+    """
+    Graba el audio de una llamada contestada en WAV 8 kHz mono 16-bit.
+    Usa únicamente el módulo 'wave' de la stdlib — sin librerías adicionales.
+    Tamaño aproximado: ~1 MB/min.
+    """
+    REC_SR = 8000   # Hz — óptimo para voz, mínimo tamaño
+
+    def __init__(self, device_index, filepath: str):
+        super().__init__(daemon=True, name="CallRecorder")
+        self.device_index = device_index
+        self.filepath     = filepath
+        self._stop_ev     = threading.Event()
+
+    def stop(self):
+        self._stop_ev.set()
+
+    def run(self):
+        if not _SD_OK:
+            return
+        try:
+            dev_info  = sd.query_devices(self.device_index, "input")
+            sr_native = int(dev_info["default_samplerate"])
+        except Exception as exc:
+            print(f"[Recorder] Dispositivo inválido: {exc}")
+            return
+
+        blocksize = int(sr_native * 0.1)   # bloques de 100 ms
+        frames: list[bytes] = []
+
+        try:
+            with sd.InputStream(
+                device     = self.device_index,
+                channels   = 1,
+                samplerate = sr_native,
+                blocksize  = blocksize,
+                dtype      = "float32",
+            ) as stream:
+                while not self._stop_ev.is_set():
+                    data, _ = stream.read(blocksize)
+                    chunk   = data[:, 0].astype(np.float32)
+                    # Resamplear a 8 kHz si el dispositivo usa otra tasa
+                    if sr_native != self.REC_SR:
+                        g     = gcd(self.REC_SR, sr_native)
+                        chunk = resample_poly(
+                            chunk, self.REC_SR // g, sr_native // g
+                        ).astype(np.float32)
+                    # Convertir a PCM 16-bit
+                    pcm = np.clip(chunk, -1.0, 1.0)
+                    frames.append((pcm * 32767).astype(np.int16).tobytes())
+        except Exception as exc:
+            print(f"[Recorder] Error de captura: {exc}")
+
+        if not frames:
+            return
+
+        os.makedirs(os.path.dirname(self.filepath), exist_ok=True)
+        with _wave.open(self.filepath, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)          # 16-bit = 2 bytes
+            wf.setframerate(self.REC_SR)
+            wf.writeframes(b"".join(frames))
+
+        size_kb = os.path.getsize(self.filepath) / 1024
+        print(f"[Recorder] Guardado: {self.filepath} ({size_kb:.0f} KB)")
 
 
 # ══════════════════════════════════════════════
@@ -1093,13 +1169,14 @@ class IVRCampaign(threading.Thread):
         self.processed     = 0
         self.device_id     = config.get("device_id")
         self.delay_s       = float(config.get("delay_seconds", 5))
-        self.audio_welcome  = config.get("audio_welcome")   # bienvenida — se reproduce UNA vez
-        self.audio_menu     = config.get("audio_menu")      # menú IVR — se repite N veces
-        self.audio_bye      = config.get("audio_bye")       # despedida global (fallback por opción)
-        self.audio_no_tone  = config.get("audio_no_tone")   # audio al agotar intentos sin tono
-        self.ivr_options    = config.get("ivr_options", {}) # {"1": "Interesado", ...}
+        self.audio_welcome  = config.get("audio_welcome")
+        self.audio_menu     = config.get("audio_menu")
+        self.audio_bye      = config.get("audio_bye")
+        self.audio_no_tone  = config.get("audio_no_tone")
+        self.ivr_options    = config.get("ivr_options", {})
         self.tone_timeout   = float(config.get("tone_timeout", 10))
-        self.menu_repeats   = int(config.get("menu_repeats", 2))  # veces que se repite el menú IVR
+        self.menu_repeats   = int(config.get("menu_repeats", 2))
+        self.record_calls   = bool(config.get("record_calls", False))  # grabar llamadas contestadas
         self.is_test        = config.get("is_test", False)
 
         self._stop_event   = threading.Event()
@@ -1346,104 +1423,120 @@ class IVRCampaign(threading.Thread):
         self._digit_event.clear()
         self._last_digit = None
 
-        # ══ 1. BIENVENIDA — se reproduce UNA sola vez ═══════════════════
-        _emit_ivr("ivr_log", {"msg": "  🎙️ Reproduciendo bienvenida...", "level": "info"})
-        _play_audio(self.audio_welcome, cancel_event=disconnect_event)
+        # ── Grabación de llamada (opcional) ────────────────────────────
+        recorder = None
+        if self.record_calls and _SD_OK and _audio_monitor_device is not None:
+            ts         = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            safe_num   = number.replace("+", "").replace(" ", "")
+            rec_path   = os.path.join(IVR_RECORDINGS_DIR, f"{ts}_{safe_num}.wav")
+            recorder   = CallRecorder(_audio_monitor_device, rec_path)
+            recorder.start()
+            _emit_ivr("ivr_log", {"msg": "  🔴 Grabando llamada...", "level": "info"})
 
-        if _caller_gone():
-            stop_audio_monitor()
-            if disconnect_event and disconnect_event.is_set():
-                _emit_ivr("ivr_log", {"msg": "  📵 Cliente colgó durante la bienvenida", "level": "warn"})
-                return "DISCONNECTED_DURING_CALL", None
-            return "STOPPED", None
+        def _stop_recorder():
+            """Detiene el grabador y reporta el archivo generado."""
+            if recorder:
+                recorder.stop()
+                recorder.join(timeout=4.0)
+                if os.path.isfile(recorder.filepath):
+                    kb = os.path.getsize(recorder.filepath) / 1024
+                    _emit_ivr("ivr_log", {
+                        "msg": f"  💾 Grabación: {os.path.basename(recorder.filepath)} ({kb:.0f} KB)",
+                        "level": "success"
+                    })
 
-        # ══ 2. MENÚ IVR — se repite menu_repeats veces ══════════════════
-        # Barge-in: si ya detectó algo durante la bienvenida, evaluamos abajo
-        if self._digit_event.is_set():
-            _emit_ivr("ivr_log", {"msg": "  (Señal detectada durante la bienvenida — evaluando...)", "level": "info"})
-
-        for attempt in range(self.menu_repeats):
-            # ── Verificar antes de reproducir el menú ──────────────────
-            if _caller_gone():
-                stop_audio_monitor()
-                if disconnect_event and disconnect_event.is_set():
-                    _emit_ivr("ivr_log", {"msg": "  📵 Cliente colgó antes del menú IVR", "level": "warn"})
-                    return "DISCONNECTED_DURING_CALL", None
-                return "STOPPED", None
-
-            _emit_ivr("ivr_log", {
-                "msg": f"  📋 Reproduciendo menú IVR (intento {attempt + 1}/{self.menu_repeats})...",
-                "level": "info"
-            })
-            _play_audio(self.audio_menu, cancel_event=disconnect_event)
+        try:
+            # ══ 1. BIENVENIDA — se reproduce UNA sola vez ════════════════
+            _emit_ivr("ivr_log", {"msg": "  🎙️ Reproduciendo bienvenida...", "level": "info"})
+            _play_audio(self.audio_welcome, cancel_event=disconnect_event)
 
             if _caller_gone():
                 stop_audio_monitor()
                 if disconnect_event and disconnect_event.is_set():
-                    _emit_ivr("ivr_log", {"msg": "  📵 Cliente colgó durante el menú IVR", "level": "warn"})
+                    _emit_ivr("ivr_log", {"msg": "  📵 Cliente colgó durante la bienvenida", "level": "warn"})
                     return "DISCONNECTED_DURING_CALL", None
                 return "STOPPED", None
 
-            # ── Esperar tono DTMF ───────────────────────────────────────
-            deadline = time.time() + self.tone_timeout
-            _emit_ivr("ivr_log", {"msg": f"  ⏳ Esperando tono válido ({self.tone_timeout}s)...", "level": "info"})
+            # ══ 2. MENÚ IVR — se repite menu_repeats veces ══════════════
+            if self._digit_event.is_set():
+                _emit_ivr("ivr_log", {"msg": "  (Señal detectada durante la bienvenida — evaluando...)", "level": "info"})
 
-            digit = None
-            while time.time() < deadline:
-                # Verificar cuelgue o stop de campaña
+            for attempt in range(self.menu_repeats):
                 if _caller_gone():
                     stop_audio_monitor()
                     if disconnect_event and disconnect_event.is_set():
-                        _emit_ivr("ivr_log", {"msg": "  📵 Cliente colgó mientras esperaba tono", "level": "warn"})
+                        _emit_ivr("ivr_log", {"msg": "  📵 Cliente colgó antes del menú IVR", "level": "warn"})
                         return "DISCONNECTED_DURING_CALL", None
                     return "STOPPED", None
 
-                remaining = max(0.1, deadline - time.time())
-                self._digit_event.wait(timeout=remaining)
-                self._digit_event.clear()
+                _emit_ivr("ivr_log", {
+                    "msg": f"  📋 Reproduciendo menú IVR (intento {attempt + 1}/{self.menu_repeats})...",
+                    "level": "info"
+                })
+                _play_audio(self.audio_menu, cancel_event=disconnect_event)
 
-                candidate = self._last_digit
-                self._last_digit = None
+                if _caller_gone():
+                    stop_audio_monitor()
+                    if disconnect_event and disconnect_event.is_set():
+                        _emit_ivr("ivr_log", {"msg": "  📵 Cliente colgó durante el menú IVR", "level": "warn"})
+                        return "DISCONNECTED_DURING_CALL", None
+                    return "STOPPED", None
 
-                if not candidate:
-                    continue
+                deadline = time.time() + self.tone_timeout
+                _emit_ivr("ivr_log", {"msg": f"  ⏳ Esperando tono válido ({self.tone_timeout}s)...", "level": "info"})
 
-                if candidate in self.ivr_options:
-                    digit = candidate
-                    break
-                else:
-                    _emit_ivr("ivr_log", {
-                        "msg": f"  Tono '{candidate}' no configurado — ignorando",
-                        "level": "info"
-                    })
+                digit = None
+                while time.time() < deadline:
+                    if _caller_gone():
+                        stop_audio_monitor()
+                        if disconnect_event and disconnect_event.is_set():
+                            _emit_ivr("ivr_log", {"msg": "  📵 Cliente colgó mientras esperaba tono", "level": "warn"})
+                            return "DISCONNECTED_DURING_CALL", None
+                        return "STOPPED", None
 
-            if digit:
-                # ── Tono válido detectado ───────────────────────────────
-                option_data = self.ivr_options[digit]
-                if isinstance(option_data, dict):
-                    desc      = option_data.get("desc", digit)
-                    audio_bye = option_data.get("audio_bye") or self.audio_bye
-                else:
-                    desc      = str(option_data)
-                    audio_bye = self.audio_bye
+                    remaining = max(0.1, deadline - time.time())
+                    self._digit_event.wait(timeout=remaining)
+                    self._digit_event.clear()
+                    candidate = self._last_digit
+                    self._last_digit = None
+                    if not candidate:
+                        continue
+                    if candidate in self.ivr_options:
+                        digit = candidate
+                        break
+                    else:
+                        _emit_ivr("ivr_log", {
+                            "msg": f"  Tono '{candidate}' no configurado — ignorando",
+                            "level": "info"
+                        })
 
-                _emit_ivr("ivr_log", {"msg": f"  ✅ Tono válido: {digit} — {desc}", "level": "success"})
-                _emit_ivr("ivr_digit", {"number": number, "digit": digit, "option": desc})
-                _play_audio(audio_bye, cancel_event=disconnect_event)
-                self._hang_up()
-                stop_audio_monitor()
-                return "ANSWERED_TONE", digit
+                if digit:
+                    option_data = self.ivr_options[digit]
+                    if isinstance(option_data, dict):
+                        desc      = option_data.get("desc", digit)
+                        audio_bye = option_data.get("audio_bye") or self.audio_bye
+                    else:
+                        desc      = str(option_data)
+                        audio_bye = self.audio_bye
 
-            # Timeout sin tono — continuar al siguiente intento del menú
+                    _emit_ivr("ivr_log", {"msg": f"  ✅ Tono válido: {digit} — {desc}", "level": "success"})
+                    _emit_ivr("ivr_digit", {"number": number, "digit": digit, "option": desc})
+                    _play_audio(audio_bye, cancel_event=disconnect_event)
+                    self._hang_up()
+                    stop_audio_monitor()
+                    return "ANSWERED_TONE", digit
 
-        # ══ 3. SIN TONO — agotados todos los intentos ═══════════════════
-        _emit_ivr("ivr_log", {"msg": "  ⚠️ Sin tono detectado en todos los intentos", "level": "warn"})
-        if self.audio_no_tone:
-            _emit_ivr("ivr_log", {"msg": "  🔔 Reproduciendo audio de cierre (sin tono)...", "level": "info"})
-            _play_audio(self.audio_no_tone, cancel_event=disconnect_event)
-        self._hang_up()
-        stop_audio_monitor()
-        return "ANSWERED_NO_TONE", None
+            # ══ 3. SIN TONO — agotados todos los intentos ════════════════
+            _emit_ivr("ivr_log", {"msg": "  ⚠️ Sin tono detectado en todos los intentos", "level": "warn"})
+            if self.audio_no_tone:
+                _emit_ivr("ivr_log", {"msg": "  🔔 Reproduciendo audio de cierre (sin tono)...", "level": "info"})
+                _play_audio(self.audio_no_tone, cancel_event=disconnect_event)
+            self._hang_up()
+            stop_audio_monitor()
+            return "ANSWERED_NO_TONE", None
+
+        finally:
+            _stop_recorder()   # siempre se ejecuta — en cualquier punto de salida
 
     # ── Helpers ADB ──────────────────────────────────────────────
 
@@ -1900,13 +1993,14 @@ def ivr_start():
         "numbers":        numbers,
         "device_id":      data.get("device_id"),
         "delay_seconds":  data.get("delay_seconds", 5),
-        "audio_welcome":  data.get("audio_welcome"),   # bienvenida — una vez
-        "audio_menu":     data.get("audio_menu"),      # menú IVR — repetido N veces
-        "audio_bye":      data.get("audio_bye"),       # despedida global (fallback)
-        "audio_no_tone":  data.get("audio_no_tone"),   # audio al agotar intentos sin tono
+        "audio_welcome":  data.get("audio_welcome"),
+        "audio_menu":     data.get("audio_menu"),
+        "audio_bye":      data.get("audio_bye"),
+        "audio_no_tone":  data.get("audio_no_tone"),
         "ivr_options":    data.get("ivr_options", {}),
         "tone_timeout":   data.get("tone_timeout", 10),
         "menu_repeats":   data.get("menu_repeats", 2),
+        "record_calls":   bool(data.get("record_calls", False)),  # grabar llamadas contestadas
         "is_test":        data.get("is_test", False),
     }
 

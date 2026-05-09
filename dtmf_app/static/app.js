@@ -437,6 +437,7 @@ function endCampaign() {
       audio_welcome:  audioPaths.welcome,
       audio_menu:     audioPaths.menu,
       audio_no_tone:  audioPaths.no_tone,
+      record_calls:   E("ivr-record-calls")?.checked || false,
       ivr_options:    {},
       is_test:        isTest
     };
