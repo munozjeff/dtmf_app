@@ -1712,6 +1712,11 @@ class IVRCampaign(threading.Thread):
             if _caller_gone():
                 stop_audio_monitor()
                 if disconnect_event and disconnect_event.is_set():
+                    # Verificar si el cliente ya pulsó una opción válida ANTES de colgar
+                    saved = self._last_digit
+                    if saved and saved in self.ivr_options:
+                        _emit_ivr("ivr_log", {"msg": f"  ✅ Tono {saved!r} recibido antes del cuelgue — registrando respuesta", "level": "success"})
+                        return "ANSWERED_TONE", saved
                     _emit_ivr("ivr_log", {"msg": "  📵 Cliente colgó durante la bienvenida", "level": "warn"})
                     return "DISCONNECTED_DURING_CALL", None
                 return "STOPPED", None
@@ -1724,6 +1729,11 @@ class IVRCampaign(threading.Thread):
                 if _caller_gone():
                     stop_audio_monitor()
                     if disconnect_event and disconnect_event.is_set():
+                        # Verificar si el cliente ya pulsó una opción válida ANTES de colgar
+                        saved = self._last_digit
+                        if saved and saved in self.ivr_options:
+                            _emit_ivr("ivr_log", {"msg": f"  ✅ Tono {saved!r} recibido antes del cuelgue — registrando respuesta", "level": "success"})
+                            return "ANSWERED_TONE", saved
                         _emit_ivr("ivr_log", {"msg": "  📵 Cliente colgó antes del menú IVR", "level": "warn"})
                         return "DISCONNECTED_DURING_CALL", None
                     return "STOPPED", None
@@ -1737,6 +1747,11 @@ class IVRCampaign(threading.Thread):
                 if _caller_gone():
                     stop_audio_monitor()
                     if disconnect_event and disconnect_event.is_set():
+                        # Verificar si el cliente ya pulsó una opción válida ANTES de colgar
+                        saved = self._last_digit
+                        if saved and saved in self.ivr_options:
+                            _emit_ivr("ivr_log", {"msg": f"  ✅ Tono {saved!r} recibido antes del cuelgue — registrando respuesta", "level": "success"})
+                            return "ANSWERED_TONE", saved
                         _emit_ivr("ivr_log", {"msg": "  📵 Cliente colgó durante el menú IVR", "level": "warn"})
                         return "DISCONNECTED_DURING_CALL", None
                     return "STOPPED", None
@@ -1749,6 +1764,15 @@ class IVRCampaign(threading.Thread):
                     if _caller_gone():
                         stop_audio_monitor()
                         if disconnect_event and disconnect_event.is_set():
+                            # Prioridad: si ya había un dígito válido en este intento
+                            # o en _last_digit, registrarlo como respuesta.
+                            if digit and digit in self.ivr_options:
+                                _emit_ivr("ivr_log", {"msg": f"  ✅ Tono {digit!r} ya validado — registrando respuesta (cuelgue ignorado)", "level": "success"})
+                                return "ANSWERED_TONE", digit
+                            saved = self._last_digit
+                            if saved and saved in self.ivr_options:
+                                _emit_ivr("ivr_log", {"msg": f"  ✅ Tono {saved!r} recibido antes del cuelgue — registrando respuesta", "level": "success"})
+                                return "ANSWERED_TONE", saved
                             _emit_ivr("ivr_log", {"msg": "  📵 Cliente colgó mientras esperaba tono", "level": "warn"})
                             return "DISCONNECTED_DURING_CALL", None
                         return "STOPPED", None
