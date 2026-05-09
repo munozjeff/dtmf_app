@@ -85,8 +85,8 @@ const _VIZ = (() => {
     ctx.fillStyle    = color;
 
     for (let i = 0; i < COLS; i++) {
-      const amp   = Math.min(1.0, buf[i]);            // 0–1
-      const barH  = Math.max(1, amp * (h * 0.9));
+      const amp   = buf[i];                               // ya es 0–1 (dBFS norm)
+      const barH  = Math.max(1, amp * (h * 0.92));
       const x     = i * barW;
       const y     = (h - barH) / 2;
       ctx.fillRect(x, y, Math.max(1, barW - 1), barH);
@@ -105,12 +105,21 @@ const _VIZ = (() => {
     }
   }
 
+  // Normalizar RMS → escala dBFS → 0..1 para la barra
+  // -60 dB = piso de silencio (0), 0 dB = máximo (1)
+  // Voz típica RMS ≈ 0.01..0.05 → -40..-26 dB → 33..57% de altura
+  function _rmsToNorm(rms) {
+    if (rms < 1e-9) return 0;
+    const db  = 20 * Math.log10(rms);
+    const MIN = -60;
+    return Math.max(0, Math.min(1, (db - MIN) / (-MIN)));
+  }
+
   function push(ch, rms) {
-    const key  = ch === "input" ? "in" : "out";
-    const s    = state[key];
-    // Scroll: desplaza buffer a la izquierda
+    const key = ch === "input" ? "in" : "out";
+    const s   = state[key];
     s.buf.copyWithin(0, 1);
-    s.buf[COLS - 1] = rms;
+    s.buf[COLS - 1] = _rmsToNorm(rms);       // ← escala log dBFS
     s.db = rms > 1e-9 ? 20 * Math.log10(rms) : -120;
   }
 
@@ -134,8 +143,37 @@ ivrSocket.on("audio_viz", ({ ch, rms }) => {
   _VIZ.push(ch, rms);
 });
 
-// Arrancar el render loop siempre (muestra silencio cuando no hay señal)
-window.addEventListener("load", () => _VIZ.start());
+// ── Auto-inicio del visualizador de audio ─────────────────────
+function _getSelIdx(id) {
+  const el = document.getElementById(id);
+  return el && el.value !== "" ? parseInt(el.value, 10) : null;
+}
+
+function startVizMonitors() {
+  const inIdx  = _getSelIdx("ivr-audio-device");
+  const outIdx = _getSelIdx("ivr-output-device");
+  if (inIdx === null && outIdx === null) return;
+  fetch("/ivr/viz/start", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ input: inIdx, output: outIdx }),
+  }).catch(() => {});
+}
+
+// Arrancar render loop y viz al cargar la página
+window.addEventListener("load", () => {
+  _VIZ.start();
+  // Pequeño delay para que el servidor esté listo
+  setTimeout(startVizMonitors, 800);
+});
+
+// Re-iniciar viz cuando cambian los selectores de dispositivo
+["ivr-audio-device", "ivr-output-device"].forEach(id => {
+  document.addEventListener("DOMContentLoaded", () => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener("change", () => setTimeout(startVizMonitors, 300));
+  });
+});
 
 // ── Log ───────────────────────────────────────────────────────
 function addLog(msg, cls) {

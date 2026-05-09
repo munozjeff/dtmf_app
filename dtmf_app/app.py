@@ -1882,6 +1882,47 @@ class LoopbackEnergyMonitor(threading.Thread):
 
 
 _loopback_viz: LoopbackEnergyMonitor | None = None
+_input_viz:    "InputVizMonitor | None" = None
+
+
+class InputVizMonitor(threading.Thread):
+    """
+    Captura audio de la interfaz de entrada seleccionada y emite audio_viz
+    para el visualizador de la UI. Opera independientemente de las llamadas.
+    """
+    def __init__(self, device_index):
+        super().__init__(daemon=True, name="InputViz")
+        self.device_index = device_index
+        self._stop_ev     = threading.Event()
+
+    def stop(self):
+        self._stop_ev.set()
+
+    def run(self):
+        if not _SD_OK or self.device_index is None:
+            return
+        try:
+            in_info = sd.query_devices(self.device_index, "input")
+            sr      = int(in_info["default_samplerate"])
+            bs      = int(sr * 0.04)   # bloques de 40 ms
+            acc, n  = 0.0, 0
+            with sd.InputStream(
+                device    = self.device_index,
+                channels  = 1,
+                samplerate= sr,
+                blocksize = bs,
+                dtype     = "float32",
+            ) as stream:
+                while not self._stop_ev.is_set():
+                    data, _ = stream.read(bs)
+                    rms     = float(np.sqrt(np.mean(data ** 2)))
+                    acc    += rms
+                    n      += 1
+                    if n >= 3:   # ~15 Hz
+                        socketio.emit("audio_viz", {"ch": "input", "rms": acc / n})
+                        acc, n = 0.0, 0
+        except Exception as exc:
+            print(f"[InputViz] {exc}")
 
 
 def start_audio_monitor(device_index=None):
@@ -1907,6 +1948,48 @@ def stop_audio_monitor():
     if _loopback_viz:
         _loopback_viz.stop()
         _loopback_viz = None
+
+
+@app.route("/ivr/viz/start", methods=["POST"])
+def ivr_viz_start():
+    """Inicia monitores de visualización de audio (entrada + salida) independientes de llamadas."""
+    global _input_viz, _loopback_viz
+    data       = request.get_json(force=True) or {}
+    in_idx     = data.get("input")
+    out_idx    = data.get("output")
+
+    # ── Monitor de entrada ──────────────────────────────
+    if in_idx is not None and _SD_OK:
+        if _input_viz and _input_viz.is_alive():
+            _input_viz.stop()
+            _input_viz.join(timeout=1.5)
+        _input_viz = InputVizMonitor(int(in_idx))
+        _input_viz.start()
+        print(f"[Viz] Monitor entrada iniciado — idx={in_idx}")
+
+    # ── Monitor de salida (loopback WASAPI) ───────────────────
+    if out_idx is not None and _SD_OK:
+        if _loopback_viz and _loopback_viz.is_alive():
+            _loopback_viz.stop()
+            _loopback_viz.join(timeout=1.5)
+        _loopback_viz = LoopbackEnergyMonitor(int(out_idx))
+        _loopback_viz.start()
+        print(f"[Viz] Monitor salida (loopback) iniciado — idx={out_idx}")
+
+    return jsonify({"ok": True})
+
+
+@app.route("/ivr/viz/stop", methods=["POST"])
+def ivr_viz_stop():
+    """Detiene los monitores de visualización de audio."""
+    global _input_viz, _loopback_viz
+    if _input_viz:
+        _input_viz.stop()
+        _input_viz = None
+    if _loopback_viz:
+        _loopback_viz.stop()
+        _loopback_viz = None
+    return jsonify({"ok": True})
 
 
 @app.route("/ivr/audio_devices")
