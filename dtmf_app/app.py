@@ -1592,6 +1592,21 @@ class IVRCampaign(threading.Thread):
 
         self._hang_up()
 
+        # ── Detener y guardar la grabación (todos los casos) ───────────────
+        # El recorder inició al marcar → debemos detenerlo siempre, ya sea ACTIVE,
+        # UNAVAILABLE, NO_ANSWER o cualquier otro resultado.
+        if recorder:
+            global _active_recorder
+            _active_recorder = None          # desconectar del monitor ANTES de stop
+            recorder.stop()
+            recorder.join(timeout=5.0)
+            if os.path.isfile(recorder.filepath):
+                kb = os.path.getsize(recorder.filepath) / 1024
+                _emit_ivr("ivr_log", {
+                    "msg": f"  💾 Grabación: {os.path.basename(recorder.filepath)} ({kb:.0f} KB) [{result_status}]",
+                    "level": "success"
+                })
+
         # Incluir info de pre-llamada en las notas del CSV cuando aplica
         pre_notes = ""
         if pre_call and (pre_voice or pre_rings > 0):
@@ -1646,20 +1661,13 @@ class IVRCampaign(threading.Thread):
         self._last_digit = None
 
         # El grabador ya está corriendo desde _process_number (inicio de la llamada).
-        # Aquí solo definimos _stop_recorder() para detenerlo al terminar _handle_active.
+        # _stop_recorder aquí solo desconecta del monitor de audio (evita que le lleguen
+        # más chunks). El stop/join real lo hace _process_number al terminar.
         def _stop_recorder():
-            """Detiene el grabador y reporta el archivo generado."""
+            """Desconecta el grabador del monitor de audio (sin detener el thread)."""
             global _active_recorder
-            if recorder:
-                _active_recorder = None   # desconectar del monitor ANTES de stop
-                recorder.stop()
-                recorder.join(timeout=4.0)
-                if os.path.isfile(recorder.filepath):
-                    kb = os.path.getsize(recorder.filepath) / 1024
-                    _emit_ivr("ivr_log", {
-                        "msg": f"  💾 Grabación: {os.path.basename(recorder.filepath)} ({kb:.0f} KB)",
-                        "level": "success"
-                    })
+            if recorder and _active_recorder is recorder:
+                _active_recorder = None   # el monitor ya no envía chunks al recorder
 
         try:
             # ══ 1. BIENVENIDA — se reproduce UNA sola vez ════════════════
