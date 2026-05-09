@@ -674,7 +674,7 @@ def _wa_load_config():
     if os.path.isfile(WA_CONFIG_FILE):
         try:
             with open(WA_CONFIG_FILE, "r", encoding="utf-8") as fh:
-        data = json.load(fh)
+                data = json.load(fh)
             _wa_config.update(data)
             print(f"[WA] Config cargada: enabled={_wa_config['enabled']} contact='{_wa_config['contact']}'")
         except Exception as exc:
