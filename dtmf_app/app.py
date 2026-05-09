@@ -649,7 +649,8 @@ _adb_watchdog: "ADBWatchdog | None" = None   # monitor de conexión ADB
 _ivr_dtmf_callback = None   # callable(digit) | None
 
 # Dispositivo de salida de audio seleccionado (nombre para pygame)
-_audio_output_device_name: str | None = None
+_audio_output_device_name:  str | None = None
+_audio_output_device_index: int | None = None   # índice del dispositivo de salida (loopback)
 
 # ── WhatsApp Notifications ──────────────────────────────────────────
 WA_CONFIG_FILE = os.path.join(os.path.dirname(__file__), "wa_notif_config.json")
@@ -857,17 +858,22 @@ import wave as _wave
 
 class CallRecorder(threading.Thread):
     """
-    Graba el audio de una llamada contestada en WAV 8 kHz mono 16-bit.
-    Usa únicamente el módulo 'wave' de la stdlib — sin librerías adicionales.
-    Tamaño aproximado: ~1 MB/min.
-    """
-    REC_SR = 8000   # Hz — óptimo para voz, mínimo tamaño
+    Graba el audio de una llamada en WAV estéreo a tasa nativa del dispositivo.
 
-    def __init__(self, device_index, filepath: str):
+    Canal IZQUIERDO — entrada  : micrófono (voz del cliente / lo que llega del teléfono)
+    Canal DERECHO   — salida   : loopback WASAPI (audio IVR reproducido al cliente)
+
+    Si el loopback no está disponible → graba mono desde el micrófono.
+    Usa la tasa nativa del dispositivo (sin downsampling) para máxima calidad.
+    Tamaño aproximado: estéreo 44.1 kHz ≈ 10 MB/min | mono ≈ 5 MB/min.
+    """
+
+    def __init__(self, input_device, output_device, filepath: str):
         super().__init__(daemon=True, name="CallRecorder")
-        self.device_index = device_index
-        self.filepath     = filepath
-        self._stop_ev     = threading.Event()
+        self.input_device  = input_device   # índice dispositivo de entrada (mic)
+        self.output_device = output_device  # índice dispositivo de salida (para loopback)
+        self.filepath      = filepath
+        self._stop_ev      = threading.Event()
 
     def stop(self):
         self._stop_ev.set()
@@ -875,51 +881,102 @@ class CallRecorder(threading.Thread):
     def run(self):
         if not _SD_OK:
             return
+
+        # ── Dispositivo de entrada ─────────────────────────────
         try:
-            dev_info  = sd.query_devices(self.device_index, "input")
-            sr_native = int(dev_info["default_samplerate"])
+            in_info = sd.query_devices(self.input_device, "input")
+            SR      = int(in_info["default_samplerate"])   # tasa nativa — sin downsampling
         except Exception as exc:
-            print(f"[Recorder] Dispositivo inválido: {exc}")
+            print(f"[Recorder] Dispositivo de entrada inválido: {exc}")
             return
 
-        blocksize = int(sr_native * 0.1)   # bloques de 100 ms
-        frames: list[bytes] = []
+        frames_in:  list[np.ndarray] = []
+        frames_out: list[np.ndarray] = []
+        bs = int(SR * 0.1)   # bloques de 100 ms
 
+        # ── Hilo de loopback WASAPI (salida) ──────────────────────
+        loopback_ok = False
+
+        def _record_loopback():
+            nonlocal loopback_ok
+            try:
+                out_info = sd.query_devices(self.output_device, "output")
+                sr_out   = int(out_info["default_samplerate"])
+                bs_out   = int(sr_out * 0.1)
+                wasapi   = sd.WasapiSettings(loopback=True)
+                with sd.InputStream(
+                    device        = self.output_device,
+                    channels      = 1,
+                    samplerate    = sr_out,
+                    blocksize     = bs_out,
+                    dtype         = "float32",
+                    extra_settings= wasapi,
+                ) as lb_stream:
+                    loopback_ok = True
+                    while not self._stop_ev.is_set():
+                        data, _ = lb_stream.read(bs_out)
+                        chunk   = data[:, 0].astype(np.float32)
+                        # Resamplear al SR del dispositivo de entrada si difieren
+                        if sr_out != SR:
+                            g     = gcd(SR, sr_out)
+                            chunk = resample_poly(chunk, SR // g, sr_out // g).astype(np.float32)
+                        frames_out.append(chunk)
+            except Exception as exc:
+                print(f"[Recorder] Loopback no disponible: {exc}")
+
+        lb_thread = None
+        if self.output_device is not None:
+            lb_thread = threading.Thread(target=_record_loopback, daemon=True)
+            lb_thread.start()
+            time.sleep(0.15)   # dar tiempo al loopback para arrancar
+
+        # ── Captura del micrófono (entrada) ─────────────────────
         try:
             with sd.InputStream(
-                device     = self.device_index,
-                channels   = 1,
-                samplerate = sr_native,
-                blocksize  = blocksize,
-                dtype      = "float32",
-            ) as stream:
+                device    = self.input_device,
+                channels  = 1,
+                samplerate= SR,
+                blocksize = bs,
+                dtype     = "float32",
+            ) as in_stream:
                 while not self._stop_ev.is_set():
-                    data, _ = stream.read(blocksize)
-                    chunk   = data[:, 0].astype(np.float32)
-                    # Resamplear a 8 kHz si el dispositivo usa otra tasa
-                    if sr_native != self.REC_SR:
-                        g     = gcd(self.REC_SR, sr_native)
-                        chunk = resample_poly(
-                            chunk, self.REC_SR // g, sr_native // g
-                        ).astype(np.float32)
-                    # Convertir a PCM 16-bit
-                    pcm = np.clip(chunk, -1.0, 1.0)
-                    frames.append((pcm * 32767).astype(np.int16).tobytes())
+                    data, _ = in_stream.read(bs)
+                    frames_in.append(data[:, 0].astype(np.float32))
         except Exception as exc:
-            print(f"[Recorder] Error de captura: {exc}")
+            print(f"[Recorder] Error captura entrada: {exc}")
 
-        if not frames:
+        if lb_thread:
+            lb_thread.join(timeout=2.0)
+
+        if not frames_in:
             return
+
+        # ── Mezclar y guardar ──────────────────────────────────
+        audio_in = np.concatenate(frames_in)
+
+        if frames_out and loopback_ok:
+            audio_out = np.concatenate(frames_out)
+            # Igualar longitudes
+            n = min(len(audio_in), len(audio_out))
+            stereo = np.stack([audio_in[:n], audio_out[:n]], axis=1)   # L=mic, R=loopback
+            channels = 2
+        else:
+            stereo   = audio_in.reshape(-1, 1)
+            channels = 1
+
+        pcm = np.clip(stereo, -1.0, 1.0)
+        pcm = (pcm * 32767).astype(np.int16)
 
         os.makedirs(os.path.dirname(self.filepath), exist_ok=True)
         with _wave.open(self.filepath, "wb") as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)          # 16-bit = 2 bytes
-            wf.setframerate(self.REC_SR)
-            wf.writeframes(b"".join(frames))
+            wf.setnchannels(channels)
+            wf.setsampwidth(2)    # 16-bit
+            wf.setframerate(SR)
+            wf.writeframes(pcm.tobytes())
 
+        mode    = "estéreo (mic + IVR)" if channels == 2 else "mono (solo mic)"
         size_kb = os.path.getsize(self.filepath) / 1024
-        print(f"[Recorder] Guardado: {self.filepath} ({size_kb:.0f} KB)")
+        print(f"[Recorder] Guardado: {self.filepath} ({size_kb:.0f} KB, {mode} @ {SR} Hz)")
 
 
 # ══════════════════════════════════════════════
@@ -1426,12 +1483,17 @@ class IVRCampaign(threading.Thread):
         # ── Grabación de llamada (opcional) ────────────────────────────
         recorder = None
         if self.record_calls and _SD_OK and _audio_monitor_device is not None:
-            ts         = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            safe_num   = number.replace("+", "").replace(" ", "")
-            rec_path   = os.path.join(IVR_RECORDINGS_DIR, f"{ts}_{safe_num}.wav")
-            recorder   = CallRecorder(_audio_monitor_device, rec_path)
+            ts       = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            safe_num = number.replace("+", "").replace(" ", "")
+            rec_path = os.path.join(IVR_RECORDINGS_DIR, f"{ts}_{safe_num}.wav")
+            recorder = CallRecorder(
+                input_device  = _audio_monitor_device,
+                output_device = _audio_output_device_index,   # loopback WASAPI
+                filepath      = rec_path
+            )
             recorder.start()
-            _emit_ivr("ivr_log", {"msg": "  🔴 Grabando llamada...", "level": "info"})
+            mode_lbl = "estéreo (mic + IVR)" if _audio_output_device_index is not None else "mono"
+            _emit_ivr("ivr_log", {"msg": f"  🔴 Grabando llamada [{mode_lbl}]...", "level": "info"})
 
         def _stop_recorder():
             """Detiene el grabador y reporta el archivo generado."""
@@ -1963,7 +2025,7 @@ def wa_status():
 @app.route("/ivr/start", methods=["POST"])
 def ivr_start():
     """Inicia una campaña o una prueba con 1 número."""
-    global _ivr_campaign, _audio_monitor_device, _audio_output_device_name
+    global _ivr_campaign, _audio_monitor_device, _audio_output_device_name, _audio_output_device_index
     with _ivr_lock:
         if _ivr_campaign and _ivr_campaign.is_running:
             return jsonify({"ok": False, "error": "Ya hay una campaña activa"}), 409
@@ -1977,7 +2039,8 @@ def ivr_start():
     # Guardar dispositivos de audio seleccionados
     audio_input_index  = data.get("audio_device")        # índice int | None
     audio_output_index = data.get("audio_output_device") # índice int | None
-    _audio_monitor_device = audio_input_index
+    _audio_monitor_device       = audio_input_index
+    _audio_output_device_index  = int(audio_output_index) if audio_output_index is not None else None
 
     # Obtener nombre del dispositivo de salida para pygame
     if audio_output_index is not None and _SD_OK:
