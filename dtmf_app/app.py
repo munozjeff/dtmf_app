@@ -40,8 +40,8 @@ except Exception:
     _OPENPYXL_OK = False
     print("[WARN] openpyxl no disponible — carga de Excel desactivada")
 
-# IVR — CallMonitor
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+# IVR — CallMonitor (ahora dentro de dtmf_app/)
+sys.path.insert(0, os.path.dirname(__file__))   # asegura imports locales dentro de dtmf_app
 try:
     from estado_llamada import CallMonitor
     _MONITOR_OK = True
@@ -49,7 +49,7 @@ except Exception as _e:
     _MONITOR_OK = False
     print(f"[WARN] CallMonitor no disponible: {_e}")
 
-# IVR — WhatsApp Notifier
+# IVR — WhatsApp Notifier (ahora dentro de dtmf_app/notificaciones/)
 try:
     from notificaciones.whatsapp_ivr_notifier import (
         WhatsAppIVRNotifier, build_notification_message
