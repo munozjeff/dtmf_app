@@ -846,6 +846,231 @@ class ADBWatchdog(threading.Thread):
                 })
 
 
+# ══════════════════════════════════════════════
+#  PRE-CALL AUDIO ANALYZER
+#  Detecta ring tones y voz del operador ANTES de que la llamada entre en ACTIVE
+#  Técnicas: Goertzel @ ring freqs + Spectral Flatness + ZCR
+# ══════════════════════════════════════════════
+
+class PreCallAudioAnalyzer(threading.Thread):
+    """
+    Analiza el audio capturado internamente durante la fase DIALING/CONNECTING
+    para distinguir:
+      - Tonos de timbre (ring tones): señal tonal estrecha con patrón ON/OFF
+      - Voz del operador: señal broadband sostenida (número apagado/no disponible)
+
+    Resultado:
+      self.ring_count     (int)  — número de rings completos detectados
+      self.operator_voice (bool) — True si se detectó voz del operador
+    """
+
+    # ── Parámetros de análisis ─────────────────────────────────────
+    FRAME_MS     = 100          # ms por ventana de análisis
+    # Frecuencias típicas de ring tone (Hz) — Colombia: ~425 Hz
+    RING_FREQS   = [400, 425, 440, 450]
+    RING_E_THR   = 5e-5         # energía mínima para procesar el frame
+    FLAT_TONE    = 0.12         # spectral flatness ≤ → frame tonal (ring)
+    FLAT_VOICE   = 0.22         # spectral flatness ≥ → frame broadband (voz)
+    ZCR_VOICE    = 0.07         # ZCR normalizado ≥ → componente vocal
+    RING_ON_MIN  = 0.7          # duración mínima burst de ring (s)
+    RING_ON_MAX  = 3.2          # duración máxima burst de ring (s)
+    RING_OFF_MIN = 1.2          # silencio mínimo entre rings (s)
+    VOICE_WIN    = 1.5          # ventana para evaluar voz sostenida (s)
+    VOICE_RATIO  = 0.55         # % frames de voz para declarar operator_voice
+    MAX_RINGS    = 2            # límite de rings para clasificar como UNAVAILABLE
+
+    def __init__(self, device_index=None):
+        super().__init__(daemon=True, name="PreCallAudioAnalyzer")
+        self.device_index   = device_index
+        self._stop_ev       = threading.Event()
+        self.ring_count     = 0
+        self.operator_voice = False
+        # Estado interno del detector de ring
+        self._in_ring       = False
+        self._ring_start    = 0.0
+        self._silence_start = 0.0
+        self._in_silence    = False
+        self._pending_ring  = False   # burst completado, esperando silencio para confirmar
+        self._pending_start = 0.0
+        # Historial de clasificaciones de frame para VAD
+        self._frame_classes: list = []   # "ring" | "voice" | "silence"
+
+    # ── API pública ────────────────────────────────────────────────
+
+    def stop(self):
+        self._stop_ev.set()
+
+    # ── Métodos de análisis espectral ──────────────────────────────
+
+    @staticmethod
+    def _goertzel_ring_energy(frame: np.ndarray, sr: int) -> float:
+        """Suma de energía Goertzel en las frecuencias típicas de ring tone."""
+        N = len(frame)
+        total = 0.0
+        for freq in PreCallAudioAnalyzer.RING_FREQS:
+            k      = int(0.5 + N * freq / sr)
+            omega  = 2.0 * np.pi * k / N
+            coeff  = 2.0 * np.cos(omega)
+            s1 = s2 = 0.0
+            for x in frame:
+                s  = float(x) + coeff * s1 - s2
+                s2 = s1
+                s1 = s
+            total += (s2**2 + s1**2 - coeff * s1 * s2) / (N * N)
+        return total
+
+    @staticmethod
+    def _spectral_flatness(frame: np.ndarray) -> float:
+        """Spectral flatness (Wiener entropy): 0=tonal puro, 1=ruido blanco."""
+        fft_mag = np.abs(np.fft.rfft(frame))
+        fft_mag = fft_mag[fft_mag > 1e-12]   # evitar log(0)
+        if len(fft_mag) < 4:
+            return 0.0
+        geo_mean = np.exp(np.mean(np.log(fft_mag)))
+        ari_mean = np.mean(fft_mag)
+        return float(geo_mean / (ari_mean + 1e-12))
+
+    @staticmethod
+    def _zcr(frame: np.ndarray) -> float:
+        """Zero-crossing rate normalizado (0–1)."""
+        signs = np.sign(frame)
+        signs[signs == 0] = 1
+        crossings = np.sum(np.abs(np.diff(signs))) / 2
+        return float(crossings / len(frame))
+
+    # ── Clasificador de frame ──────────────────────────────────────
+
+    def _classify_frame(self, energy: float, ring_e: float,
+                        flatness: float, zcr: float) -> str:
+        """Clasifica un frame de audio como 'ring', 'voice' o 'silence'."""
+        if energy < self.RING_E_THR:
+            return "silence"
+
+        # Tonal + energía concentrada en frecuencias de ring → ring
+        if flatness <= self.FLAT_TONE and ring_e > energy * 0.30:
+            return "ring"
+
+        # Broadband + ZCR alto → voz
+        if flatness >= self.FLAT_VOICE and zcr >= self.ZCR_VOICE:
+            return "voice"
+
+        # Broadband sin ZCR suficiente pero claramente no tonal → voice (conservador)
+        if flatness >= self.FLAT_VOICE:
+            return "voice"
+
+        return "silence"   # ambiguo → tratar como silencio
+
+    # ── Máquina de estados para ring detection ─────────────────────
+
+    def _update_ring_state(self, cls: str, now: float):
+        """Actualiza el conteo de rings en base a la secuencia ON/OFF."""
+        is_active = (cls == "ring")
+
+        if is_active:
+            if not self._in_ring:
+                # Inicio de nuevo burst
+                self._in_ring    = True
+                self._ring_start = now
+                self._in_silence = False
+                self._silence_start = 0.0
+        else:
+            if self._in_ring:
+                burst_dur = now - self._ring_start
+                self._in_ring = False
+                if self.RING_ON_MIN <= burst_dur <= self.RING_ON_MAX:
+                    # Burst de duración correcta → esperamos el silencio para confirmar
+                    self._pending_ring  = True
+                    self._pending_start = now
+                elif burst_dur > self.RING_ON_MAX:
+                    # Demasiado largo para ser ring → ignorar
+                    self._pending_ring = False
+                self._silence_start = now
+                self._in_silence    = True
+
+            if self._in_silence and self._pending_ring:
+                silence_dur = now - self._pending_start
+                if silence_dur >= self.RING_OFF_MIN:
+                    # Ring confirmado (burst + silencio correcto)
+                    self.ring_count   += 1
+                    self._pending_ring = False
+                    print(f"[PreCall] Ring #{self.ring_count} detectado")
+
+    # ── Evaluador de voz sostenida (VAD) ───────────────────────────
+
+    def _update_vad(self, cls: str):
+        """Acumula clasificaciones y detecta voz sostenida del operador."""
+        self._frame_classes.append(cls)
+        frames_in_window = int(self.VOICE_WIN * 1000 / self.FRAME_MS)
+        if len(self._frame_classes) > frames_in_window * 2:
+            self._frame_classes = self._frame_classes[-frames_in_window:]
+        if len(self._frame_classes) >= frames_in_window:
+            window = self._frame_classes[-frames_in_window:]
+            voice_ratio = window.count("voice") / len(window)
+            if voice_ratio >= self.VOICE_RATIO:
+                self.operator_voice = True
+
+    # ── Hilo principal ────────────────────────────────────────────
+
+    def run(self):
+        if not _SD_OK:
+            print("[PreCall] sounddevice no disponible — análisis pre-llamada omitido")
+            return
+        try:
+            dev_info  = sd.query_devices(self.device_index, "input")
+            sr_native = int(dev_info["default_samplerate"])
+        except Exception as exc:
+            print(f"[PreCall] Dispositivo inválido: {exc}")
+            return
+
+        frame_samples_native = int(sr_native * self.FRAME_MS / 1000)
+        frame_samples_8k     = int(TARGET_SR * self.FRAME_MS / 1000)
+
+        print(f"[PreCall] Iniciado — dispositivo idx={self.device_index} @ {sr_native} Hz")
+
+        try:
+            with sd.InputStream(
+                device      = self.device_index,
+                channels    = 1,
+                samplerate  = sr_native,
+                blocksize   = frame_samples_native,
+                dtype       = "float32",
+            ) as stream:
+                while not self._stop_ev.is_set():
+                    data, _ = stream.read(frame_samples_native)
+                    if self._stop_ev.is_set():
+                        break
+
+                    chunk = data[:, 0].astype(np.float32)
+
+                    # Resamplear a 8 kHz para análisis
+                    if sr_native != TARGET_SR:
+                        g     = gcd(TARGET_SR, sr_native)
+                        chunk = resample_poly(
+                            chunk, TARGET_SR // g, sr_native // g
+                        ).astype(np.float32)
+
+                    # Tomar exactamente frame_samples_8k muestras
+                    if len(chunk) > frame_samples_8k:
+                        chunk = chunk[:frame_samples_8k]
+                    elif len(chunk) < frame_samples_8k // 2:
+                        continue
+
+                    energy   = float(np.mean(chunk ** 2))
+                    ring_e   = self._goertzel_ring_energy(chunk, TARGET_SR)
+                    flatness = self._spectral_flatness(chunk)
+                    zcr      = self._zcr(chunk)
+
+                    cls = self._classify_frame(energy, ring_e, flatness, zcr)
+                    now = time.time()
+
+                    self._update_ring_state(cls, now)
+                    self._update_vad(cls)
+
+        except Exception as exc:
+            print(f"[PreCall] Error en captura: {exc}")
+
+        print(f"[PreCall] Detenido — rings={self.ring_count} voice={self.operator_voice}")
+
 
 class IVRCampaign(threading.Thread):
     """
@@ -988,6 +1213,18 @@ class IVRCampaign(threading.Thread):
             time.sleep(3)
             call_state["current"] = "ACTIVE"
 
+        # — 3. Analizador de audio pre-llamada (durante DIALING) ——————
+        # Detecta ring tones y voz del operador ANTES de que la llamada entre en ACTIVE.
+        # Si hay voz del operador con ≤ MAX_RINGS rings → número apagado/no disponible.
+        pre_call = None
+        if _SD_OK and _audio_monitor_device is not None:
+            pre_call = PreCallAudioAnalyzer(device_index=_audio_monitor_device)
+            pre_call.start()
+            _emit_ivr("ivr_log", {
+                "msg": "  🔍 Analizando audio pre-llamada (ring/voz)...",
+                "level": "info"
+            })
+
         # Esperar hasta que la llamada entre en ACTIVE o se desconecte (máx 60 s)
         deadline = time.time() + 60
         while not call_stop.is_set() and not self._stop_event.is_set():
@@ -995,11 +1232,34 @@ class IVRCampaign(threading.Thread):
                 break
             time.sleep(0.2)
 
+        # Detener analizador pre-llamada y leer resultados
+        pre_rings = 0
+        pre_voice = False
+        if pre_call and pre_call.is_alive():
+            pre_call.stop()
+            pre_call.join(timeout=2.0)
+        if pre_call:
+            pre_rings = pre_call.ring_count
+            pre_voice = pre_call.operator_voice
+            _emit_ivr("ivr_log", {
+                "msg": f"  📊 Pre-llamada: {pre_rings} ring(s) — voz_operador={pre_voice}",
+                "level": "info"
+            })
+
         final_state = call_state["current"]
 
         if final_state == "ACTIVE":
-            # El monitor sigue corriendo → puede detectar DISCONNECTED durante _handle_active()
-            result_status, result_digit = self._handle_active(number, call_disconnected)
+            if pre_voice and pre_rings <= PreCallAudioAnalyzer.MAX_RINGS:
+                # ⛔ Operador respondió sin dar tiempo a suficientes rings → apagado/sin servicio
+                result_status = "UNAVAILABLE"
+                _emit_ivr("ivr_log", {
+                    "msg": f"  ⛔ Número no disponible — {pre_rings} ring(s) antes del operador",
+                    "level": "warn"
+                })
+                self._hang_up()
+            else:
+                # El monitor sigue corriendo → puede detectar DISCONNECTED durante _handle_active()
+                result_status, result_digit = self._handle_active(number, call_disconnected)
         elif final_state in ("DISCONNECTED", "CONNECTING", "DIALING"):
             result_status = "NO_ANSWER" if final_state != "DISCONNECTED" else "DISCONNECTED"
         else:
@@ -1012,7 +1272,11 @@ class IVRCampaign(threading.Thread):
 
         self._hang_up()
 
-        _save_call_result(number, result_status, result_digit)
+        # Incluir info de pre-llamada en las notas del CSV cuando aplica
+        pre_notes = ""
+        if pre_call and (pre_voice or pre_rings > 0):
+            pre_notes = f"rings={pre_rings} voice={pre_voice}"
+        _save_call_result(number, result_status, result_digit, pre_notes)
         _emit_ivr("ivr_call_update", {
             "number": number, "status": result_status,
             "digit": result_digit,

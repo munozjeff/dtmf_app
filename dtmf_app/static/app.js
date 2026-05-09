@@ -75,6 +75,7 @@ function onCallUpdate({ number, status }) {
         NO_ANSWER:               "p-warn",
         DISCONNECTED:            "p-warn",
         DISCONNECTED_DURING_CALL:"p-disc",   // 📵 colgó mientras hablaba
+        UNAVAILABLE:             "p-off",    // ⛔ apagado / no disponible
         ERROR:                   "p-err",
       };
       const labels = {
@@ -85,14 +86,17 @@ function onCallUpdate({ number, status }) {
         CALLING:                  "📞 Marcando",
         ACTIVE:                   "🟢 Activa",
         DISCONNECTED:             "❌ Desconect.",
+        UNAVAILABLE:              "⛔ No disponible",
         ERROR:                    "❌ Error",
       };
       pill.className = "pill " + (cls[status] || "p-pend");
       pill.textContent = labels[status] || status;
     }
-    // Log especial para cuelgue durante llamada activa
+    // Log especial según estado
     if (status === "DISCONNECTED_DURING_CALL") {
       addLog("📵 " + number + " — colgó durante la llamada (audio detenido)", "warn");
+    } else if (status === "UNAVAILABLE") {
+      addLog("⛔ " + number + " — apagado o no disponible (colgar automático)", "warn");
     }
   }
 }
