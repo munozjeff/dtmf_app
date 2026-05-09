@@ -2056,15 +2056,33 @@ def ivr_test_output():
     device_index = data.get("device_index")  # None = predeterminado
 
     def _play_beep():
+        global _loopback_viz
+        # ── Pausar el loopback viz para liberar el dispositivo ──
+        _lv_was_running = _loopback_viz and _loopback_viz.is_alive()
+        if _lv_was_running:
+            _loopback_viz.stop()
+            _loopback_viz.join(timeout=1.5)
+            _loopback_viz = None
         try:
             sr   = 44100
-            dur  = 1.0      # 1 segundo
+            dur  = 1.5      # 1.5 segundos
             freq = 1000.0   # 1 kHz — tono fácil de reconocer
             t    = np.linspace(0, dur, int(sr * dur), endpoint=False)
-            # Envelope suave para evitar clicks
             env  = np.where(t < 0.05, t / 0.05,
-                   np.where(t > 0.95, (dur - t) / 0.05, 1.0))
+                   np.where(t > 1.45, (dur - t) / 0.05, 1.0))
             wave = (np.sin(2 * np.pi * freq * t) * env * 0.7).astype(np.float32)
+
+            # Emitir audio_viz durante la reproducción (simula nivel de salida)
+            def _out_viz_thread():
+                block = int(sr * 0.067)   # ~15 Hz
+                for i in range(0, len(wave), block):
+                    chunk = wave[i:i + block]
+                    rms   = float(np.sqrt(np.mean(chunk ** 2)))
+                    socketio.emit("audio_viz", {"ch": "output", "rms": rms})
+                    time.sleep(0.067)
+
+            threading.Thread(target=_out_viz_thread, daemon=True).start()
+
             kwargs = {"samplerate": sr}
             if device_index is not None:
                 kwargs["device"] = int(device_index)
@@ -2073,6 +2091,11 @@ def ivr_test_output():
             _emit_ivr("ivr_log", {"msg": "🔊 Pitido de prueba reproducido OK", "level": "success"})
         except Exception as exc:
             _emit_ivr("ivr_log", {"msg": f"❌ Error reproduciendo pitido: {exc}", "level": "error"})
+        finally:
+            # ── Reiniciar loopback viz si estaba corriendo ──
+            if _lv_was_running and _audio_output_device_index is not None:
+                _loopback_viz = LoopbackEnergyMonitor(_audio_output_device_index)
+                _loopback_viz.start()
 
     threading.Thread(target=_play_beep, daemon=True).start()
     return jsonify({"ok": True, "msg": "Reproduciendo pitido..."})
@@ -2082,7 +2105,7 @@ def ivr_test_output():
 def ivr_test_input():
     """
     Captura 3 segundos de audio del mic seleccionado y emite el nivel de energía
-    por socket. El frontend muestra una barra de nivel en tiempo real.
+    por socket. El frontend muestra una barra de nivel en tiempo real Y la waveform.
     """
     if not _SD_OK:
         return jsonify({"ok": False, "error": "sounddevice no instalado"})
@@ -2090,26 +2113,36 @@ def ivr_test_input():
     device_index = data.get("device_index")
 
     def _capture():
+        global _input_viz
+        # ── Pausar InputVizMonitor para liberar el dispositivo ──
+        _iv_was_running = _input_viz and _input_viz.is_alive()
+        if _iv_was_running:
+            _input_viz.stop()
+            _input_viz.join(timeout=1.5)
+            _input_viz = None
         try:
             dev_info  = sd.query_devices(device_index, "input")
             sr_native = int(dev_info["default_samplerate"])
             dev_name  = dev_info["name"]
             _emit_ivr("ivr_log", {"msg": f"🎤 Probando entrada: [{dev_name}]...", "level": "info"})
 
-            duration  = 3.0   # segundos
-            frames    = []
-            stop_ev   = threading.Event()
+            duration = 3.0
+            frames   = []
+            stop_ev  = threading.Event()
 
             def callback(indata, n, t, status):
                 chunk  = indata[:, 0].astype(np.float32)
                 energy = float(np.mean(chunk ** 2))
-                # Escala log para la barra (0-100)
+                rms    = float(np.sqrt(energy))
+                # Barra de nivel (0-100)
                 level = 0 if energy < 1e-10 else min(100, int(10 * np.log10(energy / 1e-10)))
                 socketio.emit("input_test_level", {"level": level, "energy": round(energy, 8)})
+                # Waveform viz
+                socketio.emit("audio_viz", {"ch": "input", "rms": rms})
                 frames.append(chunk)
 
             with sd.InputStream(device=device_index, channels=1,
-                                samplerate=sr_native, blocksize=int(sr_native * 0.1),
+                                samplerate=sr_native, blocksize=int(sr_native * 0.067),
                                 callback=callback):
                 stop_ev.wait(timeout=duration)
 
@@ -2122,6 +2155,11 @@ def ivr_test_input():
         except Exception as exc:
             _emit_ivr("ivr_log", {"msg": f"❌ Error prueba entrada: {exc}", "level": "error"})
             socketio.emit("input_test_done", {"peak": 0})
+        finally:
+            # ── Reiniciar InputVizMonitor si estaba corriendo ──
+            if _iv_was_running and device_index is not None:
+                _input_viz = InputVizMonitor(int(device_index))
+                _input_viz.start()
 
     threading.Thread(target=_capture, daemon=True).start()
     return jsonify({"ok": True, "msg": "Capturando 3 segundos..."})
