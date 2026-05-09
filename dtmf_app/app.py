@@ -1195,7 +1195,7 @@ class IVRCampaign(threading.Thread):
         # Un número apagado/no disponible pasa a ACTIVE en < 10s desde DIALING
         # Un número que timbra (incluso al buzón) pasa a ACTIVE en ≥10s
         dialing_start_time: list = [time.time()]   # lista mutable para acceso desde closure
-        MIN_DIALING_SECS = 10.0   # seg — umbral de tiempo en DIALING para confirmar que timbó
+        MIN_DIALING_SECS = 15.0   # seg — umbral de tiempo en DIALING para confirmar que timbó
 
         def on_state(state: str):
             call_state["current"] = state
