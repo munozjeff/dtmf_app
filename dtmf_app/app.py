@@ -1023,8 +1023,10 @@ class PreCallAudioAnalyzer(threading.Thread):
     RING_ON_MIN  = 0.7          # duración mínima burst de ring (s)
     RING_ON_MAX  = 3.2          # duración máxima burst de ring (s)
     RING_OFF_MIN = 1.2          # silencio mínimo entre rings (s)
-    VOICE_WIN    = 1.5          # ventana para evaluar voz sostenida (s)
-    VOICE_RATIO  = 0.55         # % frames de voz para declarar operator_voice
+    # Voz del operador: debe ser CONTINUA al menos N segundos sin interrupción.
+    # Un humano diciendo "Hola?" dura ~0.5-1.5 s y luego hace pausa.
+    # Un operador/mensaje grabado habla sin pausas desde el primer segundo.
+    VOICE_SUSTAINED_MIN = 3.0   # segundos consecutivos de voz para declarar operator_voice
     MAX_RINGS    = 2            # límite de rings para clasificar como UNAVAILABLE
 
     def __init__(self, device_index=None):
@@ -1038,10 +1040,10 @@ class PreCallAudioAnalyzer(threading.Thread):
         self._ring_start    = 0.0
         self._silence_start = 0.0
         self._in_silence    = False
-        self._pending_ring  = False   # burst completado, esperando silencio para confirmar
+        self._pending_ring  = False
         self._pending_start = 0.0
-        # Historial de clasificaciones de frame para VAD
-        self._frame_classes: list = []   # "ring" | "voice" | "silence"
+        # Contador de frames de voz CONSECUTIVOS (para VAD por duración sostenida)
+        self._consecutive_voice_frames = 0   # se resetea a 0 en cuanto hay silencio/ring
 
     # ── API pública ────────────────────────────────────────────────
 
@@ -1146,16 +1148,24 @@ class PreCallAudioAnalyzer(threading.Thread):
     # ── Evaluador de voz sostenida (VAD) ───────────────────────────
 
     def _update_vad(self, cls: str):
-        """Acumula clasificaciones y detecta voz sostenida del operador."""
-        self._frame_classes.append(cls)
-        frames_in_window = int(self.VOICE_WIN * 1000 / self.FRAME_MS)
-        if len(self._frame_classes) > frames_in_window * 2:
-            self._frame_classes = self._frame_classes[-frames_in_window:]
-        if len(self._frame_classes) >= frames_in_window:
-            window = self._frame_classes[-frames_in_window:]
-            voice_ratio = window.count("voice") / len(window)
-            if voice_ratio >= self.VOICE_RATIO:
-                self.operator_voice = True
+        """
+        Detecta voz SOSTENIDA del operador contando frames consecutivos de voz.
+
+        Regla: el operador habla sin pausa desde el primer segundo (anuncio grabado).
+               Un humano que contesta dice "Hola?" (~0.5-1.5 s) y luego para.
+
+        operator_voice = True solo si hay ≥ VOICE_SUSTAINED_MIN segundos CONSECUTIVOS
+        de voz sin ningún frame de silencio o ring que interrumpa.
+        """
+        if cls == "voice":
+            self._consecutive_voice_frames += 1
+        else:
+            # Cualquier silencio o ring reinicia el contador
+            self._consecutive_voice_frames = 0
+
+        sustained_secs = self._consecutive_voice_frames * self.FRAME_MS / 1000.0
+        if sustained_secs >= self.VOICE_SUSTAINED_MIN:
+            self.operator_voice = True
 
     # ── Hilo principal ────────────────────────────────────────────
 
