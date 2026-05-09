@@ -1023,13 +1023,15 @@ class PreCallAudioAnalyzer(threading.Thread):
     RING_ON_MIN  = 0.7          # duración mínima burst de ring (s)
     RING_ON_MAX  = 3.2          # duración máxima burst de ring (s)
     RING_OFF_MIN = 1.2          # silencio mínimo entre rings (s)
-    # Voz del operador: debe ser CONTINUA al menos N segundos sin interrupción.
-    # Un humano diciendo "Hola?" dura ~0.5-1.5 s y luego hace pausa.
-    # Un operador/mensaje grabado habla sin pausas desde el primer segundo.
-    # Nota: en la ventana post-ACTIVE la audio routing acaba de iniciar
-    # por lo que usamos 2.0s (más alcanzable que 3.0s en una ventana de 4.5s).
-    VOICE_SUSTAINED_MIN = 2.0   # segundos consecutivos de voz para declarar operator_voice
-    MAX_RINGS    = 2            # límite de rings para clasificar como UNAVAILABLE
+    # Voz del operador — detector espectral:
+    VOICE_SUSTAINED_MIN = 2.0   # segundos consecutivos de 'voz' (flatness+ZCR) para operator_voice
+    # Voz del operador — detector por energía (método alternativo/paralelo):
+    # Un operador o buzon genera energía constante desde el primer momento.
+    # Un número en silencio (apagado sin operador) tiene energía 0.
+    # Se activa si RMS >= ENERGY_THR_SIGNAL durante ENERGY_SUSTAINED_MIN seg. consecutivos.
+    ENERGY_THR_SIGNAL    = 8e-3  # RMS mínimo para considerar 'hay señal' (calibrar con viz)
+    ENERGY_SUSTAINED_MIN = 2.0   # segundos consecutivos de señal sostenida
+    MAX_RINGS    = 2             # límite de rings para clasificar como UNAVAILABLE
 
     def __init__(self, device_index=None):
         super().__init__(daemon=True, name="PreCallAudioAnalyzer")
@@ -1044,8 +1046,10 @@ class PreCallAudioAnalyzer(threading.Thread):
         self._in_silence    = False
         self._pending_ring  = False
         self._pending_start = 0.0
-        # Contador de frames de voz CONSECUTIVOS (para VAD por duración sostenida)
-        self._consecutive_voice_frames = 0   # se resetea a 0 en cuanto hay silencio/ring
+        # Contador de frames de voz CONSECUTIVOS (detector espectral)
+        self._consecutive_voice_frames  = 0
+        # Contador de frames con ENERGÍA sostenida (detector por energía)
+        self._consecutive_energy_frames = 0
 
     # ── API pública ────────────────────────────────────────────────
 
@@ -1053,8 +1057,9 @@ class PreCallAudioAnalyzer(threading.Thread):
         self._stop_ev.set()
 
     def reset_vad_counter(self):
-        """Reinicia el contador de voz consecutiva (llamar al inicio de la ventana post-ACTIVE)."""
-        self._consecutive_voice_frames = 0
+        """Reinicia contadores de voz y energía (llamar al inicio de la ventana post-ACTIVE)."""
+        self._consecutive_voice_frames  = 0
+        self._consecutive_energy_frames = 0
 
     # ── Métodos de análisis espectral ──────────────────────────────
 
@@ -1155,25 +1160,37 @@ class PreCallAudioAnalyzer(threading.Thread):
 
     def _update_vad(self, cls: str):
         """
-        Detecta voz SOSTENIDA del operador contando frames consecutivos de voz.
-
-        Regla: el operador habla sin pausa desde el primer segundo (anuncio grabado).
-               Un humano que contesta dice "Hola?" (~0.5-1.5 s) y luego para.
-
-        operator_voice = True solo si hay ≥ VOICE_SUSTAINED_MIN segundos CONSECUTIVOS
-        de voz sin ningún frame de silencio o ring que interrumpa.
+        [Método 1 — espectral] Detecta voz SOSTENIDA contando frames consecutivos de 'voice'.
+        Un humano dice "Hola?" (~0.5-1.5 s) y pausa; el operador habla sin pausa 2+ s.
         """
         if cls == "voice":
             self._consecutive_voice_frames += 1
         else:
-            # Cualquier silencio o ring reinicia el contador
             self._consecutive_voice_frames = 0
 
         sustained_secs = self._consecutive_voice_frames * self.FRAME_MS / 1000.0
-        # Log de diagnóstico cada segundo para ver qué detecta el analizador
         if self._consecutive_voice_frames > 0 and self._consecutive_voice_frames % 10 == 0:
-            print(f"[PreCall] Voz consecutiva: {sustained_secs:.1f}s (umbral: {self.VOICE_SUSTAINED_MIN}s)")
+            print(f"[PreCall] Espectral voz consecutiva: {sustained_secs:.1f}s")
         if sustained_secs >= self.VOICE_SUSTAINED_MIN:
+            self.operator_voice = True
+
+    def _update_energy_vad(self, energy: float):
+        """
+        [Método 2 — energía] Detecta señal CONTINUA por RMS sostenido.
+        Funciona independientemente del tipo de señal (voz, música, tono).
+        El operador/buzon genera energía constante; el silencio de apagado = RMS ≈ 0.
+        RING_OFF cancela el contador (los timbres tienen gaps de silencio).
+        """
+        rms = float(np.sqrt(energy)) if energy > 0 else 0.0
+        if rms >= self.ENERGY_THR_SIGNAL:
+            self._consecutive_energy_frames += 1
+        else:
+            self._consecutive_energy_frames = 0
+
+        sustained_secs = self._consecutive_energy_frames * self.FRAME_MS / 1000.0
+        if self._consecutive_energy_frames > 0 and self._consecutive_energy_frames % 10 == 0:
+            print(f"[PreCall] Energía sostenida: {sustained_secs:.1f}s  RMS={rms:.4f}")
+        if sustained_secs >= self.ENERGY_SUSTAINED_MIN:
             self.operator_voice = True
 
     # ── Hilo principal ────────────────────────────────────────────
@@ -1231,7 +1248,8 @@ class PreCallAudioAnalyzer(threading.Thread):
                     now = time.time()
 
                     self._update_ring_state(cls, now)
-                    self._update_vad(cls)
+                    self._update_vad(cls)            # Método 1: espectral
+                    self._update_energy_vad(energy)  # Método 2: energía sostenida
 
                     # ── Visualizador: emitir RMS al canal 'input' (~10 Hz) ──
                     rms = float(np.sqrt(energy))
