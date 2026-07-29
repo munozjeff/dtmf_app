@@ -2514,9 +2514,9 @@ def ivr_results():
                      download_name="ivr_results.csv", mimetype="text/csv")
 
 
-# ══════════════════════════════════════════════
-#  MARCACIÓN MANUAL
-# ══════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
+#  MARCACIÓN MANUAL  —  flujo IVR completo
+# ══════════════════════════════════════════════════════════════
 
 _manual_call: "ManualCallSession | None" = None
 _manual_lock = threading.Lock()
@@ -2524,23 +2524,30 @@ _manual_lock = threading.Lock()
 
 class ManualCallSession(threading.Thread):
     """
-    Gestiona una llamada manual única:
-      - Marca el número vía ADB
-      - Monitorea el estado con CallMonitor
-      - Activa audio monitor DTMF (mismo que campaña)
-      - Permite colgar desde la UI
-      - Emite eventos Socket.IO: manual_state, manual_log
-
-    NO puede iniciarse si hay una campaña activa (→ guard en ruta).
+    Llamada manual con flujo IVR completo idéntico a IVRCampaign:
+      - Marca vía ADB
+      - Monitorea estado con CallMonitor
+      - Registra _ivr_dtmf_callback (mismo mecanismo que la campaña)
+      - Reproduce audio de bienvenida, menú IVR, despedida
+      - Detecta tonos DTMF y registra la opción seleccionada
+      - Emite manual_state y manual_log a la UI
     """
 
     def __init__(
         self,
-        number: str,
-        device_id: str | None,
-        audio_input: int | None,
-        audio_output_idx: int | None,
-        audio_output_name: str | None,
+        number:            str,
+        device_id:         "str | None",
+        audio_input:       "int | None",
+        audio_output_idx:  "int | None",
+        audio_output_name: "str | None",
+        # Config IVR
+        audio_welcome:     "str | None" = None,
+        audio_menu:        "str | None" = None,
+        audio_no_tone:     "str | None" = None,
+        ivr_options:       "dict"       = None,
+        tone_timeout:      int          = 10,
+        menu_repeats:      int          = 2,
+        record_calls:      bool         = False,
     ):
         super().__init__(daemon=True, name="ManualCall")
         self.number            = number
@@ -2549,25 +2556,37 @@ class ManualCallSession(threading.Thread):
         self.audio_output_idx  = audio_output_idx
         self.audio_output_name = audio_output_name
 
-        self.state      = "IDLE"   # IDLE | DIALING | ACTIVE | ENDED | ERROR
-        self.is_active  = False    # True mientras la llamada está en curso
-        self._stop_ev   = threading.Event()
-        self._hangup_ev = threading.Event()
+        # IVR
+        self.audio_welcome = audio_welcome
+        self.audio_menu    = audio_menu
+        self.audio_no_tone = audio_no_tone
+        self.ivr_options   = ivr_options or {}
+        self.tone_timeout  = tone_timeout
+        self.menu_repeats  = menu_repeats
+        self.record_calls  = record_calls
 
-    # ── helpers internos ─────────────────────────────────────────
+        self.state      = "IDLE"
+        self.is_active  = False
+        self._hangup_ev = threading.Event()
+        # DTMF (mismo mecanismo que IVRCampaign)
+        self._digit_event = threading.Event()
+        self._last_digit: "str | None" = None
+
+    # ── Helpers internos ──────────────────────────────────────────
 
     def _log(self, msg: str, level: str = "info"):
-        """Emite un mensaje al log de marcación manual en la UI."""
         print(f"[Manual] {msg}")
         socketio.emit("manual_log", {"msg": msg, "level": level, "ts": time.time()})
 
     def _set_state(self, state: str):
-        """Actualiza el estado y lo emite a la UI."""
         self.state = state
-        socketio.emit("manual_state", {
-            "state":  state,
-            "number": self.number,
-        })
+        socketio.emit("manual_state", {"state": state, "number": self.number})
+
+    def on_dtmf(self, digit: str):
+        """Llamado por PythonAudioMonitor cuando detecta un tono DTMF."""
+        print(f"[Manual] Dígito DTMF: {digit}")
+        self._last_digit = digit
+        self._digit_event.set()
 
     def _adb(self, *args: str):
         cmd = ["adb"]
@@ -2578,32 +2597,121 @@ class ManualCallSession(threading.Thread):
 
     def _hang_up(self):
         try:
-            self._adb("shell", "input", "keyevent", "6")  # KEYCODE_ENDCALL
+            self._adb("shell", "input", "keyevent", "6")
         except Exception:
             pass
 
     def hangup(self):
         """Solicita colgar la llamada desde fuera del hilo."""
         self._hangup_ev.set()
-        self._stop_ev.set()
+        self._digit_event.set()   # desbloquear espera de tono
 
-    # ── hilo principal ────────────────────────────────────────────
+    def _gone(self, disconn_ev: threading.Event) -> bool:
+        """True si el usuario colgó o la llamada se cortó."""
+        return self._hangup_ev.is_set() or disconn_ev.is_set()
+
+    # ── Bucle IVR (idéntico a IVRCampaign._handle_active) ────────
+
+    def _run_ivr(self, disconn_ev: threading.Event):
+        """
+        Ejecuta el flujo IVR completo una vez la llamada está ACTIVE:
+          1. Bienvenida
+          2. Menú IVR (menu_repeats veces)
+          3. Detección de tono válido
+          4. Audio de despedida (global o por opción)
+        """
+        self._digit_event.clear()
+        self._last_digit = None
+
+        # --- 1. Bienvenida ---
+        if self.audio_welcome:
+            self._log("🎙️ Reproduciendo bienvenida...", "info")
+            _play_audio(self.audio_welcome, cancel_event=self._hangup_ev)
+
+        if self._gone(disconn_ev):
+            return "DISCONNECTED_DURING_CALL", None
+
+        # --- 2. Menú IVR ---
+        for attempt in range(self.menu_repeats):
+            if self._gone(disconn_ev):
+                return "DISCONNECTED_DURING_CALL", None
+
+            if self.audio_menu:
+                self._log(f"📋 Menú IVR (intento {attempt+1}/{self.menu_repeats})...", "info")
+                _play_audio(self.audio_menu, cancel_event=self._hangup_ev)
+
+            if self._gone(disconn_ev):
+                return "DISCONNECTED_DURING_CALL", None
+
+            # Esperar tono válido
+            self._log(f"⏳ Esperando tono DTMF ({self.tone_timeout}s)...", "info")
+            deadline = time.time() + self.tone_timeout
+
+            while time.time() < deadline:
+                if self._gone(disconn_ev):
+                    # Si ya hay dígito válido guardado, registrarlo
+                    if self._last_digit and self._last_digit in self.ivr_options:
+                        digit = self._last_digit
+                        self._log(f"✅ Tono {digit!r} antes del cuelgue", "success")
+                        return "ANSWERED_TONE", digit
+                    return "DISCONNECTED_DURING_CALL", None
+
+                remaining = max(0.05, deadline - time.time())
+                self._digit_event.wait(timeout=min(remaining, 0.3))
+                self._digit_event.clear()
+
+                candidate = self._last_digit
+                self._last_digit = None
+
+                if candidate is None:
+                    continue
+
+                if candidate in self.ivr_options:
+                    # Tono válido detectado
+                    opt = self.ivr_options[candidate]
+                    desc = opt.get("desc", candidate) if isinstance(opt, dict) else str(opt)
+                    bye_path = opt.get("audio_bye") if isinstance(opt, dict) else None
+
+                    self._log(f"🎯 Opción {candidate!r}: {desc}", "success")
+                    socketio.emit("ivr_digit", {
+                        "number": self.number, "digit": candidate, "option": desc
+                    })
+
+                    # Audio de despedida
+                    bye = bye_path or self.audio_no_tone
+                    if bye:
+                        _play_audio(bye, cancel_event=self._hangup_ev)
+
+                    return "ANSWERED_TONE", candidate
+                else:
+                    self._log(f"⚠️ Tono {candidate!r} no configurado — ignorado", "warn")
+
+        # Sin respuesta tras todos los intentos
+        if self.audio_no_tone:
+            self._log("📢 Sin tono — reproduciendo audio de no respuesta...", "warn")
+            _play_audio(self.audio_no_tone, cancel_event=self._hangup_ev)
+
+        return "ANSWERED_NO_TONE", None
+
+    # ── Hilo principal ────────────────────────────────────────────
 
     def run(self):
-        global _audio_monitor_device, _audio_output_device_name, _audio_output_device_index
+        global _audio_monitor_device, _audio_output_device_name, \
+               _audio_output_device_index, _ivr_dtmf_callback
 
-        # Convertir a int si llegan como string (JSON puede enviarlos como str)
-        audio_in  = int(self.audio_input)       if self.audio_input       is not None else None
-        audio_out = int(self.audio_output_idx)  if self.audio_output_idx  is not None else None
+        # Convertir a int de forma segura
+        audio_in  = int(self.audio_input)      if self.audio_input      is not None else None
+        audio_out = int(self.audio_output_idx) if self.audio_output_idx is not None else None
 
-        # Registrar dispositivos de audio en globals para que _play_audio y
-        # start_audio_monitor los usen igual que en una campaña automática
+        # Registrar globals de audio (igual que IVRCampaign)
         _audio_monitor_device      = audio_in
         _audio_output_device_index = audio_out
         _audio_output_device_name  = self.audio_output_name
 
-        # Inicializar mixer pygame con el dispositivo de salida correcto
-        # (igual que hace IVRCampaign antes de reproducir audios)
+        # Registrar callback DTMF (IGUAL que IVRCampaign.run())
+        _ivr_dtmf_callback = self.on_dtmf
+
+        # Inicializar mixer pygame
         if _PYGAME_OK:
             _ensure_mixer(self.audio_output_name)
 
@@ -2611,7 +2719,7 @@ class ManualCallSession(threading.Thread):
         self._set_state("DIALING")
         self._log(f"📞 Marcando: {self.number}", "info")
 
-        # ─ 1. Marcar ───────────────────────────────────────────
+        # ─ 1. Marcar vía ADB ───────────────────────────────────────
         try:
             self._adb("shell", "am", "start", "-a",
                       "android.intent.action.CALL", "-d", f"tel:{self.number}")
@@ -2619,41 +2727,34 @@ class ManualCallSession(threading.Thread):
             self._log(f"❌ Error ADB al marcar: {exc}", "error")
             self._set_state("ERROR")
             self.is_active = False
+            _ivr_dtmf_callback = None
             return
 
-        # ─ 2. Monitorear estado vía logcat ───────────────────────
+        # ─ 2. Monitor de estado vía logcat ────────────────────────
         call_active_ev = threading.Event()
         disconn_ev     = threading.Event()
         monitor_stop   = threading.Event()
-        call_state     = {"current": "CONNECTING"}
 
         def on_state(state: str):
-            call_state["current"] = state
             self._log(f"  → Estado: {state}", "info")
-
             if state in ("DIALING", "CONNECTING", "RINGING"):
                 self._set_state("DIALING")
-
             elif state == "ACTIVE":
                 call_active_ev.set()
                 self._set_state("ACTIVE")
-
             elif state in ("DISCONNECTED", "TIMEOUT"):
                 disconn_ev.set()
-                call_active_ev.set()  # desbloquear espera
+                call_active_ev.set()
                 self._set_state("ENDED")
 
         if _MONITOR_OK:
-            monitor = CallMonitor(
-                device_id=self.device_id,
-                timeout_s=CALL_MONITOR_TIMEOUT_S,
-            )
+            monitor = CallMonitor(device_id=self.device_id, timeout_s=CALL_MONITOR_TIMEOUT_S)
             monitor.start(on_state_change=on_state, stop_event=monitor_stop)
         else:
-            self._log("⚠️ CallMonitor no disponible — esperando 10s", "warn")
+            self._log("⚠️ CallMonitor no disponible — esperando conexión...", "warn")
             monitor = None
 
-        # Esperar ACTIVE, DISCONNECTED o hangup manual (timeout 90s)
+        # Esperar ACTIVE o hangup (timeout 90s)
         deadline = time.time() + IVR_DIAL_TIMEOUT
         while not call_active_ev.is_set() and not self._hangup_ev.is_set():
             if time.time() > deadline:
@@ -2669,6 +2770,7 @@ class ManualCallSession(threading.Thread):
             monitor_stop.set()
             self._set_state("ENDED")
             self.is_active = False
+            _ivr_dtmf_callback = None
             return
 
         if disconn_ev.is_set():
@@ -2676,96 +2778,111 @@ class ManualCallSession(threading.Thread):
             monitor_stop.set()
             self._set_state("ENDED")
             self.is_active = False
+            _ivr_dtmf_callback = None
             return
 
-        # ─ 3. ACTIVE — activar monitor de audio DTMF ────────────────
-        self._log("✅ Llamada contestada — monitor DTMF activo", "success")
-        start_audio_monitor(audio_in)   # usa el int ya convertido
+        # ─ 3. ACTIVE — iniciar monitor DTMF + flujo IVR ────────────────
+        self._log("✅ Llamada contestada — iniciando flujo IVR...", "success")
+        start_audio_monitor(audio_in)
 
-        # Esperar hasta que el usuario cuelgue o la llamada termine
-        while not self._hangup_ev.is_set() and not disconn_ev.is_set():
-            time.sleep(0.3)
+        # Ejecutar flujo IVR completo
+        result_status, result_digit = self._run_ivr(disconn_ev)
 
-        # ─ 4. Colgar y limpiar ─────────────────────────────────
-        if self._hangup_ev.is_set():
-            self._log("🔴 Colgando llamada...", "warn")
-            self._hang_up()
-
+        # ─ 4. Colgar y limpiar ───────────────────────────────────
         monitor_stop.set()
         stop_audio_monitor()
+        _ivr_dtmf_callback = None
+
+        if self._hangup_ev.is_set():
+            self._log("🔴 Colgando llamada...", "warn")
+        self._hang_up()
+
         self._set_state("ENDED")
         self.is_active = False
+
+        status_emoji = {
+            "ANSWERED_TONE":     "✅",
+            "ANSWERED_NO_TONE":  "⚠️",
+            "DISCONNECTED_DURING_CALL": "📥",
+        }.get(result_status, "ℹ️")
+        self._log(
+            f"{status_emoji} Resultado: {result_status}"
+            + (f" — opción {result_digit}" if result_digit else ""),
+            "success" if result_status == "ANSWERED_TONE" else "info"
+        )
         self._log("✓ Llamada manual finalizada", "info")
 
 
-# ── Rutas de marcación manual ───────────────────────────────────
+# ── Rutas de marcación manual ───────────────────────────────────────────
 
 @app.route("/ivr/manual/dial", methods=["POST"])
 def manual_dial():
-    """Inicia una llamada manual a un número."""
+    """Inicia una llamada manual con flujo IVR completo."""
     global _manual_call
 
     # Guard 1: campaña activa
     with _ivr_lock:
         if _ivr_campaign and _ivr_campaign.is_running:
-            return jsonify({
-                "ok":    False,
-                "error": "Hay una campaña automática en curso. Deténla primero."
-            }), 409
+            return jsonify({"ok": False,
+                            "error": "Hay una campaña activa. Deténla primero."}), 409
 
     # Guard 2: llamada manual ya activa
     with _manual_lock:
         if _manual_call and _manual_call.is_active:
-            return jsonify({
-                "ok":    False,
-                "error": "Ya hay una llamada manual en curso. Cuelga antes de marcar."
-            }), 409
+            return jsonify({"ok": False,
+                            "error": "Ya hay una llamada manual en curso."}), 409
 
     data   = request.get_json(force=True) or {}
     number = str(data.get("number", "")).strip()
 
-    # Validar número
     digits_only = number.replace("+", "").replace("-", "").replace(" ", "")
     if not number or not digits_only.isdigit() or len(digits_only) < 6:
         return jsonify({"ok": False, "error": "Número inválido (mínimo 6 dígitos)"}), 400
 
-    # Validar dispositivo ADB
     device_id = data.get("device_id") or None
     if not device_id:
-        return jsonify({"ok": False, "error": "Selecciona un dispositivo ADB antes de marcar"}), 400
+        return jsonify({"ok": False, "error": "Selecciona un dispositivo ADB"}), 400
 
-    # Dispositivos de audio (opcionales)
-    audio_input_raw  = data.get("audio_device")
-    audio_output_raw = data.get("audio_output_device")
+    # ─ Dispositivos de audio ───────────────────────────────────────
+    def _si(v):   # safe int
+        try: return int(v) if v is not None and str(v).strip() != "" else None
+        except: return None
 
-    # Convertir a int de forma segura (el JSON puede traer strings o numbers)
-    audio_input: "int | None" = None
-    audio_output_idx: "int | None" = None
-    try:
-        if audio_input_raw  is not None and str(audio_input_raw).strip() != "":
-            audio_input = int(audio_input_raw)
-    except (ValueError, TypeError):
-        pass
-    try:
-        if audio_output_raw is not None and str(audio_output_raw).strip() != "":
-            audio_output_idx = int(audio_output_raw)
-    except (ValueError, TypeError):
-        pass
+    audio_in_idx  = _si(data.get("audio_device"))
+    audio_out_idx = _si(data.get("audio_output_device"))
+    audio_out_name: "str | None" = None
 
-    audio_output_name: "str | None" = None
-    if audio_output_idx is not None and _SD_OK:
+    if audio_out_idx is not None and _SD_OK:
         try:
-            audio_output_name = sd.query_devices(audio_output_idx)["name"]
+            audio_out_name = sd.query_devices(audio_out_idx)["name"]
         except Exception:
-            audio_output_name = None
+            pass
+
+    # ─ Config IVR ───────────────────────────────────────────────
+    ivr_options_raw = data.get("ivr_options", {})
+    # Normalizar: cada valor puede ser str o dict {desc, audio_bye}
+    ivr_options: dict = {}
+    if isinstance(ivr_options_raw, dict):
+        for k, v in ivr_options_raw.items():
+            if isinstance(v, dict):
+                ivr_options[str(k)] = v
+            else:
+                ivr_options[str(k)] = str(v) if v else ""
 
     with _manual_lock:
         _manual_call = ManualCallSession(
             number            = number,
             device_id         = device_id,
-            audio_input       = audio_input,       # ya es int | None
-            audio_output_idx  = audio_output_idx,  # ya es int | None
-            audio_output_name = audio_output_name,
+            audio_input       = audio_in_idx,
+            audio_output_idx  = audio_out_idx,
+            audio_output_name = audio_out_name,
+            audio_welcome     = data.get("audio_welcome") or None,
+            audio_menu        = data.get("audio_menu")    or None,
+            audio_no_tone     = data.get("audio_no_tone") or None,
+            ivr_options       = ivr_options,
+            tone_timeout      = int(data.get("tone_timeout", 10)),
+            menu_repeats      = int(data.get("menu_repeats", 2)),
+            record_calls      = bool(data.get("record_calls", False)),
         )
         _manual_call.start()
 
