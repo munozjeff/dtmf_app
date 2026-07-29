@@ -3114,10 +3114,16 @@ def templates_audio_file(filename):
 #  dispositivo ADB y canal de audio.
 # ══════════════════════════════════════════════════════════════════════
 
-from dtmf_app.core.session_manager import session_manager
-from dtmf_app.core.ivr_session     import SessionConfig
-from dtmf_app.core.audio_probe     import AudioChannelProber
-from dtmf_app.core.audio_player    import AudioPlayer
+# Asegurar que el directorio de app.py esté en sys.path para importar core/
+import sys as _sys
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+if _THIS_DIR not in _sys.path:
+    _sys.path.insert(0, _THIS_DIR)
+
+from core.session_manager import session_manager
+from core.ivr_session     import SessionConfig
+from core.audio_probe     import AudioChannelProber
+from core.audio_player    import AudioPlayer
 
 # ── Registro de sondas activas (probe en curso por device_id) ─────────────
 _active_probes: "dict[str, AudioChannelProber]" = {}
