@@ -767,3 +767,236 @@ function endCampaign() {
 
 })();
 
+
+// ══════════════════════════════════════════════════════════════
+//  MODO SELECTOR  —  Campaña Automática  ↔  Marcación Manual
+// ══════════════════════════════════════════════════════════════
+
+/**
+ * Alterna entre panel de campaña y panel de marcación manual.
+ * Bloqueos:
+ *   - No puedes cambiar a "campaign" si hay llamada manual activa.
+ *   - No puedes cambiar a "manual"  si hay campaña en curso.
+ */
+function switchMode(mode) {
+  const tabCamp  = document.getElementById("tab-campaign");
+  const tabMan   = document.getElementById("tab-manual");
+  const hdrCamp  = document.getElementById("panel-campaign-hdr");
+  const scroll   = document.querySelector(".ivr-scroll");
+  const footer   = document.querySelector(".ivr-footer");
+  const panelMan = document.getElementById("panel-manual");
+
+  if (mode === "manual") {
+    if (ivrRunning) {
+      addLog("⚠️ Detén la campaña antes de usar marcación manual.", "warn");
+      return;
+    }
+    tabCamp.classList.remove("active");
+    tabMan.classList.add("active");
+    if (hdrCamp) hdrCamp.style.display = "none";
+    if (scroll)  scroll.style.display  = "none";
+    if (footer)  footer.style.display  = "none";
+    if (panelMan) panelMan.classList.add("visible");
+
+  } else {
+    if (_manualActive) {
+      addLog("⚠️ Cuelga la llamada manual antes de volver a campaña.", "warn");
+      return;
+    }
+    tabMan.classList.remove("active");
+    tabCamp.classList.add("active");
+    if (hdrCamp) hdrCamp.style.display = "";
+    if (scroll)  scroll.style.display  = "";
+    if (footer)  footer.style.display  = "";
+    if (panelMan) panelMan.classList.remove("visible");
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+//  MARCACIÓN MANUAL — lógica JS
+// ══════════════════════════════════════════════════════════════
+
+let _manualActive = false;
+
+const MANUAL_STATE_LABELS = {
+  IDLE:    "Inactivo",
+  DIALING: "Marcando…",
+  ACTIVE:  "En llamada",
+  ENDED:   "Finalizada",
+  ERROR:   "Error",
+};
+
+function _manualSetState(state, number) {
+  const dot       = document.getElementById("manual-dot");
+  const lbl       = document.getElementById("manual-state-lbl");
+  const num       = document.getElementById("manual-state-num");
+  const btnDial   = document.getElementById("btn-manual-dial");
+  const btnHangup = document.getElementById("btn-manual-hangup");
+
+  if (dot) dot.className = "manual-state-dot " + state.toLowerCase();
+  if (lbl) lbl.textContent = MANUAL_STATE_LABELS[state] || state;
+
+  if (num) {
+    const showNum = number && state !== "IDLE" && state !== "ENDED" && state !== "ERROR";
+    num.hidden = !showNum;
+    if (showNum) num.textContent = number;
+  }
+
+  const calling  = state === "DIALING" || state === "ACTIVE";
+  _manualActive  = calling;
+
+  if (btnDial)   btnDial.disabled   = calling;
+  if (btnHangup) btnHangup.disabled = !calling;
+
+  // Bloquear lanzar campaña mientras hay llamada manual activa
+  const lb = document.getElementById("ivr-launch-btn");
+  if (lb && !ivrRunning) lb.disabled = calling;
+}
+
+function _manualLog(msg, level) {
+  const el = document.getElementById("manual-log");
+  if (!el) return;
+  const d  = document.createElement("div");
+  d.className = "manual-log-line " + (level || "info");
+  const ts = new Date().toLocaleTimeString("es-CO", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  d.textContent = "[" + ts + "] " + msg;
+  el.appendChild(d);
+  el.scrollTop = el.scrollHeight;
+}
+
+// ── Eventos Socket.IO ─────────────────────────────────────────
+ivrSocket.on("manual_state", ({ state, number }) => {
+  _manualSetState(state, number);
+  if (state === "ENDED" || state === "ERROR") {
+    _manualActive = false;
+    const lb = document.getElementById("ivr-launch-btn");
+    if (lb && !ivrRunning) lb.disabled = false;
+  }
+});
+
+ivrSocket.on("manual_log", ({ msg, level }) => {
+  _manualLog(msg, level === "success" ? "success"
+                : level === "error"   ? "error"
+                : level);
+  addLog("📞 [Manual] " + msg,
+         level === "success" ? "ok"
+       : level === "error"   ? "err"
+       : level);
+});
+
+// ── Inicialización del panel manual ──────────────────────────
+(function initManual() {
+  const E = id => document.getElementById(id);
+
+  // Numpad — dígitos
+  document.querySelectorAll(".numpad-btn[data-digit]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const inp = E("manual-number");
+      if (!inp || _manualActive) return;
+      if (inp.value.length < 20) inp.value += btn.dataset.digit;
+      inp.focus();
+    });
+  });
+
+  // Numpad — retroceso
+  E("numpad-backspace")?.addEventListener("click", () => {
+    const inp = E("manual-number");
+    if (inp && !_manualActive) { inp.value = inp.value.slice(0, -1); inp.focus(); }
+  });
+
+  // Limpiar número
+  E("manual-num-clear")?.addEventListener("click", () => {
+    const inp = E("manual-number");
+    if (inp && !_manualActive) { inp.value = ""; inp.focus(); }
+  });
+
+  // Enter → marcar
+  E("manual-number")?.addEventListener("keydown", e => {
+    if (e.key === "Enter") E("btn-manual-dial")?.click();
+  });
+
+  // ── Botón LLAMAR ─────────────────────────────────────────────
+  E("btn-manual-dial")?.addEventListener("click", async () => {
+    const inp    = E("manual-number");
+    const number = inp?.value.trim();
+
+    if (!number) {
+      _manualLog("⚠️ Ingresa un número antes de marcar.", "warn");
+      inp?.focus(); return;
+    }
+    const digits = number.replace(/[+\-\s]/g, "");
+    if (!/^\d+$/.test(digits) || digits.length < 6) {
+      _manualLog("❌ Número inválido (mínimo 6 dígitos numéricos).", "error");
+      return;
+    }
+
+    const deviceId = E("ivr-device")?.value?.trim();
+    if (!deviceId) {
+      _manualLog("❌ Selecciona un dispositivo ADB en la pestaña Campaña.", "error");
+      addLog("⚠️ Marcación manual: selecciona un dispositivo ADB primero.", "warn");
+      return;
+    }
+
+    if (ivrRunning) {
+      _manualLog("❌ Hay una campaña activa. Detenla primero.", "error");
+      return;
+    }
+
+    const inVal  = E("ivr-audio-device")?.value;
+    const outVal = E("ivr-output-device")?.value;
+    const audioIn  = (inVal  !== "" && inVal  != null) ? parseInt(inVal)  : null;
+    const audioOut = (outVal !== "" && outVal != null) ? parseInt(outVal) : null;
+
+    _manualLog("📞 Marcando " + number + "…", "info");
+    _manualSetState("DIALING", number);
+
+    try {
+      const r = await fetch("/ivr/manual/dial", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          number,
+          device_id:           deviceId,
+          audio_device:        audioIn,
+          audio_output_device: audioOut,
+        }),
+      });
+      const d = await r.json();
+      if (!d.ok) {
+        _manualLog("❌ " + (d.error || "Error al marcar"), "error");
+        _manualSetState("ERROR", null);
+        addLog("❌ Marcación manual: " + (d.error || "Error"), "err");
+      }
+    } catch (e) {
+      _manualLog("❌ Error de red: " + e.message, "error");
+      _manualSetState("ERROR", null);
+    }
+  });
+
+  // ── Botón COLGAR ──────────────────────────────────────────────
+  E("btn-manual-hangup")?.addEventListener("click", async () => {
+    _manualLog("🔴 Enviando señal de cuelgue…", "warn");
+    try {
+      const r = await fetch("/ivr/manual/hangup", { method: "POST" });
+      const d = await r.json();
+      if (!d.ok) _manualLog("⚠️ " + (d.error || "No hay llamada activa"), "warn");
+    } catch (e) {
+      _manualLog("❌ Error de red: " + e.message, "error");
+    }
+  });
+
+  // ── Restaurar estado al recargar página ──────────────────────
+  fetch("/ivr/manual/status")
+    .then(r => r.json())
+    .then(d => {
+      if (d.active) {
+        _manualSetState(d.state, d.number);
+        _manualLog("ℹ️ Llamada en curso recuperada: " + d.number, "info");
+        switchMode("manual");
+      }
+    })
+    .catch(() => {});
+
+})();
+
+

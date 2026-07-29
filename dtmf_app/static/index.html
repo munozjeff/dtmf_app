@@ -355,6 +355,156 @@
     .dot.wa-ready { background: #25d366; box-shadow: 0 0 6px #25d366; }
     .dot.wa-open  { background: #fbbf24; box-shadow: 0 0 6px #fbbf24; }
     .dot.wa-err   { background: #f87171; }
+    /* ── Tabs de modo ───────────────────────────────────────── */
+    .mode-tabs {
+      display: flex;
+      gap: 3px;
+      padding: 8px 10px 0;
+      background: rgba(255,255,255,0.02);
+      border-bottom: 1px solid rgba(255,255,255,0.07);
+    }
+    .mode-tab {
+      flex: 1;
+      padding: 7px 6px;
+      border-radius: 7px 7px 0 0;
+      border: none;
+      background: transparent;
+      color: #64748b;
+      font-size: 11px;
+      font-weight: 600;
+      font-family: Inter, sans-serif;
+      cursor: pointer;
+      transition: all .18s;
+      text-align: center;
+      letter-spacing: .01em;
+    }
+    .mode-tab:hover  { color: #94a3b8; background: rgba(255,255,255,0.04); }
+    .mode-tab.active { color: #818cf8; background: rgba(99,102,241,0.12);
+                       border: 1px solid rgba(99,102,241,0.22);
+                       border-bottom: none; }
+    .mode-tab.manual.active { color: #22d3ee; background: rgba(6,182,212,0.1);
+                              border-color: rgba(6,182,212,0.22); }
+
+    /* ── Panel Manual ────────────────────────────────────── */
+    .manual-panel {
+      display: none;
+      flex-direction: column;
+      gap: 14px;
+      padding: 14px 14px 0;
+    }
+    .manual-panel.visible { display: flex; }
+
+    /* Estado de llamada manual */
+    .manual-state-bar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 10px;
+      border-radius: 8px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.08);
+      font-size: 12px;
+    }
+    .manual-state-dot { width: 9px; height: 9px; border-radius: 50%; background: #374151; flex-shrink: 0; transition: all .3s; }
+    .manual-state-dot.idle    { background: #374151; }
+    .manual-state-dot.dialing { background: #fbbf24; box-shadow: 0 0 8px #fbbf24; animation: pulse 1s infinite; }
+    .manual-state-dot.active  { background: #4ade80; box-shadow: 0 0 8px #4ade80; }
+    .manual-state-dot.ended   { background: #64748b; }
+    .manual-state-dot.error   { background: #f87171; }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .4; } }
+    .manual-state-lbl { font-weight: 600; color: #94a3b8; flex: 1; }
+    .manual-state-num { font-family: 'JetBrains Mono', monospace; font-size: 13px; color: #22d3ee; }
+
+    /* Input de número */
+    .manual-num-wrap {
+      position: relative;
+    }
+    .manual-num-input {
+      width: 100%;
+      box-sizing: border-box;
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.14);
+      border-radius: 9px;
+      color: #e2e8f0;
+      font-size: 20px;
+      font-family: 'JetBrains Mono', monospace;
+      font-weight: 600;
+      padding: 10px 42px 10px 14px;
+      letter-spacing: .12em;
+      text-align: center;
+      outline: none;
+      transition: border-color .2s;
+    }
+    .manual-num-input:focus { border-color: rgba(6,182,212,0.5); }
+    .manual-num-clear {
+      position: absolute;
+      right: 10px; top: 50%;
+      transform: translateY(-50%);
+      background: none; border: none;
+      color: #475569; font-size: 16px;
+      cursor: pointer; padding: 2px 4px;
+      border-radius: 4px;
+      transition: color .15s;
+    }
+    .manual-num-clear:hover { color: #f87171; }
+
+    /* Teclado numérico */
+    .numpad {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 5px;
+    }
+    .numpad-btn {
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.09);
+      border-radius: 8px;
+      color: #e2e8f0;
+      font-size: 16px;
+      font-weight: 600;
+      font-family: Inter, sans-serif;
+      padding: 10px 4px 8px;
+      cursor: pointer;
+      text-align: center;
+      transition: background .12s, transform .1s;
+      line-height: 1.1;
+      user-select: none;
+    }
+    .numpad-btn sub { display: block; font-size: 7px; font-weight: 400; color: #475569; letter-spacing: .12em; min-height: 8px; }
+    .numpad-btn:hover   { background: rgba(255,255,255,0.1); }
+    .numpad-btn:active  { transform: scale(.94); background: rgba(6,182,212,0.15); }
+    .numpad-btn.special { color: #94a3b8; font-size: 18px; }
+    .numpad-btn.backsp  { color: #f87171; }
+
+    /* Botones Llamar / Colgar */
+    .manual-call-btns { display: flex; gap: 8px; }
+    .manual-call-btns .xbtn { flex: 1; justify-content: center; font-size: 13px; padding: 9px; }
+    .btn-dial   { background: linear-gradient(135deg,#059669,#10b981); color: #fff; }
+    .btn-dial:hover { opacity: .88; }
+    .btn-dial:disabled { opacity: .35; cursor: not-allowed; }
+    .btn-hangup { background: rgba(239,68,68,0.18); color: #f87171; border: 1px solid rgba(239,68,68,0.3); }
+    .btn-hangup:hover { background: rgba(239,68,68,0.3); }
+    .btn-hangup:disabled { opacity: .35; cursor: not-allowed; }
+
+    /* Log manual */
+    .manual-log {
+      flex: 1;
+      min-height: 70px;
+      max-height: 120px;
+      overflow-y: auto;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      line-height: 1.6;
+      color: #64748b;
+      background: rgba(0,0,0,0.2);
+      border-radius: 7px;
+      border: 1px solid rgba(255,255,255,0.06);
+      padding: 6px 10px;
+    }
+    .manual-log-line.ok      { color: #4ade80; }
+    .manual-log-line.error   { color: #f87171; }
+    .manual-log-line.warn    { color: #fbbf24; }
+    .manual-log-line.success { color: #34d399; }
+    .manual-log-line.info    { color: #94a3b8; }
   </style>
 </head>
 <body style="background:#0f1729;color:#e2e8f0;font-family:Inter,sans-serif;">
@@ -377,12 +527,70 @@
   <!-- ── COLUMNA IZQUIERDA ── -->
   <div class="ivr-left">
 
-    <div class="ivr-left-top">
+    <!-- Tabs de modo -->
+    <div class="mode-tabs">
+      <button class="mode-tab active" id="tab-campaign" onclick="switchMode('campaign')">
+        &#x1F4CB; Campa&ntilde;a
+      </button>
+      <button class="mode-tab manual" id="tab-manual" onclick="switchMode('manual')">
+        &#x1F4DE; Manual
+      </button>
+    </div>
+
+    <!-- Encabezado panel campa&ntilde;a -->
+    <div class="ivr-left-top" id="panel-campaign-hdr">
       <div style="font-weight:700;font-size:13px;color:#818cf8;margin-bottom:2px">Configuracion de Campana</div>
       <div class="ivr-mic-row">
         <span class="dot" id="mic-dot2"></span>
         <span id="mic-txt2">Detector inactivo</span>
       </div>
+    </div>
+
+    <!-- Panel marcaci&oacute;n manual -->
+    <div class="manual-panel" id="panel-manual">
+      <!-- Estado -->
+      <div class="manual-state-bar">
+        <span class="manual-state-dot idle" id="manual-dot"></span>
+        <span class="manual-state-lbl" id="manual-state-lbl">Inactivo</span>
+        <span class="manual-state-num" id="manual-state-num" hidden></span>
+      </div>
+
+      <!-- Input n&uacute;mero -->
+      <div class="manual-num-wrap">
+        <input class="manual-num-input" type="tel" id="manual-number"
+               placeholder="N&uacute;mero" maxlength="20"
+               inputmode="numeric" autocomplete="tel" />
+        <button class="manual-num-clear" id="manual-num-clear" title="Borrar">&times;</button>
+      </div>
+
+      <!-- Teclado -->
+      <div class="numpad" id="numpad">
+        <button class="numpad-btn" data-digit="1">1<sub>&nbsp;</sub></button>
+        <button class="numpad-btn" data-digit="2">2<sub>ABC</sub></button>
+        <button class="numpad-btn" data-digit="3">3<sub>DEF</sub></button>
+        <button class="numpad-btn" data-digit="4">4<sub>GHI</sub></button>
+        <button class="numpad-btn" data-digit="5">5<sub>JKL</sub></button>
+        <button class="numpad-btn" data-digit="6">6<sub>MNO</sub></button>
+        <button class="numpad-btn" data-digit="7">7<sub>PQRS</sub></button>
+        <button class="numpad-btn" data-digit="8">8<sub>TUV</sub></button>
+        <button class="numpad-btn" data-digit="9">9<sub>WXYZ</sub></button>
+        <button class="numpad-btn special" data-digit="*">*<sub>&nbsp;</sub></button>
+        <button class="numpad-btn" data-digit="0">0<sub>+</sub></button>
+        <button class="numpad-btn special backsp" id="numpad-backspace">&#x232B;<sub>&nbsp;</sub></button>
+      </div>
+
+      <!-- Botones Llamar / Colgar -->
+      <div class="manual-call-btns">
+        <button class="xbtn btn-dial" id="btn-manual-dial">
+          &#x1F4DE; Llamar
+        </button>
+        <button class="xbtn btn-hangup" id="btn-manual-hangup" disabled>
+          &#x1F534; Colgar
+        </button>
+      </div>
+
+      <!-- Log -->
+      <div class="manual-log" id="manual-log"></div>
     </div>
 
     <div class="ivr-scroll">

@@ -5,15 +5,17 @@ DTMF Analyzer - Flask Backend
 API REST que recibe un archivo de audio, lo procesa con el pipeline
 DTMF (filtrado, reduccion de ruido, amplificacion, Goertzel) y devuelve
 los tonos detectados junto con una imagen del espectrograma.
+
+v2: DTMF engine y configuracion importados desde core/ (sin codigo duplicado).
 """
 
 import os
 import sys
+import shutil
 import uuid
 import json
 import base64
 import subprocess
-import tempfile
 import traceback
 import threading
 import csv
@@ -21,17 +23,43 @@ import time
 import queue as _queue
 from collections import deque
 from datetime import datetime
-from io import BytesIO
 from math import gcd
+
+# ── Core DTMF — fuente unica de verdad ────────────────────────
+sys.path.insert(0, os.path.dirname(__file__))
+from core.config import (
+    TARGET_SR, DTMF_MAP, ROW_FREQS, COL_FREQS, DTMF_DIGIT_FREQS,
+    FRAME_MS, HOP_MS, MIN_TONE_MS, ENERGY_THRESHOLD, AMPLIFY_DB,
+    ROW_DOM_THRESHOLD, COL_DOM_THRESHOLD, TOTAL_DOM_THRESHOLD,
+    CONCENTRATION_THRESHOLD, DIGIT_COLORS,
+    IVR_DEFAULT_DELAY_S, IVR_DEFAULT_TONE_TIMEOUT, IVR_DEFAULT_MENU_REPEATS,
+    IVR_DIAL_TIMEOUT, IVR_MIN_DIALING_SECS, IVR_POST_ACTIVE_LISTEN,
+    ADB_WATCHDOG_INTERVAL,
+    PRECALL_FRAME_MS, RING_FREQS, RING_E_THR, FLAT_TONE, FLAT_VOICE,
+    ZCR_VOICE, RING_ON_MIN, RING_ON_MAX, RING_OFF_MIN,
+    VOICE_SUSTAINED_MIN, ENERGY_THR_SIGNAL, ENERGY_SUSTAINED_MIN, MAX_RINGS,
+    MONITOR_WINDOW_MS, MONITOR_HOP_MS, MONITOR_VIZ_HZ,
+)
+from core.dtmf_engine import (
+    get_bandpass_sos, bandpass_filter, amplify as _amplify_audio,
+    detect_dtmf_frame, analyze_dtmf, build_chart, goertzel_batch,
+    resample_audio as _resample_audio,
+)
+
+# Alias para retrocompatibilidad con el resto del archivo
+_DTMF_DIGIT_FREQS = DTMF_DIGIT_FREQS
 
 # IVR — reproducción de audio
 try:
     import pygame
+    # Inicializar mixer UNA SOLA VEZ al arrancar (no reinicializar entre pistas)
+    pygame.mixer.pre_init(frequency=44100, size=-16, channels=1, buffer=1024)
     pygame.mixer.init()
     _PYGAME_OK = True
-except Exception:
+    print("[OK] pygame.mixer inicializado")
+except Exception as _e:
     _PYGAME_OK = False
-    print("[WARN] pygame no disponible — reproducción de audio desactivada")
+    print(f"[WARN] pygame no disponible — reproducción de audio desactivada: {_e}")
 
 # IVR — lectura de Excel
 try:
@@ -81,73 +109,39 @@ from flask_cors import CORS
 from flask_socketio import SocketIO, emit
 
 # ──────────────────────────────────────────────────────────────
-# Configuracion de ffmpeg
+# Descubrimiento de ffmpeg  (portable — no hardcoded al usuario Milton)
 # ──────────────────────────────────────────────────────────────
-_FFMPEG_CANDIDATES = [
-    r"C:\Users\Milton\AppData\Local\Microsoft\WinGet\Packages"
-    r"\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe"
-    r"\ffmpeg-8.1-full_build\bin\ffmpeg.exe",
-    r"C:\ffmpeg\bin\ffmpeg.exe",
-    r"C:\Program Files\ffmpeg\bin\ffmpeg.exe",
-    "ffmpeg",   # si ya esta en el PATH del sistema
-]
+def _find_ffmpeg() -> str | None:
+    """Busca ffmpeg en PATH (shutil.which) y luego en rutas conocidas de Windows."""
+    # 1. PATH del sistema (instalación global, winget, conda, etc.)
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+    # 2. Rutas fijas de instalaciones conocidas en Windows
+    _candidates = [
+        r"C:\Users\Milton\AppData\Local\Microsoft\WinGet\Packages"
+        r"\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe"
+        r"\ffmpeg-8.1-full_build\bin\ffmpeg.exe",
+        r"C:\ffmpeg\bin\ffmpeg.exe",
+        r"C:\Program Files\ffmpeg\bin\ffmpeg.exe",
+        r"C:\ProgramData\chocolatey\bin\ffmpeg.exe",
+    ]
+    for path in _candidates:
+        if os.path.isfile(path):
+            return path
+    return None
 
-FFMPEG_EXE = None
-for _c in _FFMPEG_CANDIDATES:
-    try:
-        result = subprocess.run([_c, "-version"], capture_output=True, timeout=5)
-        if result.returncode == 0:
-            FFMPEG_EXE = _c
-            break
-    except Exception:
-        continue
-
+FFMPEG_EXE = _find_ffmpeg()
 if FFMPEG_EXE:
     _bin = os.path.dirname(FFMPEG_EXE)
-    os.environ["PATH"] = _bin + os.pathsep + os.environ.get("PATH", "")
+    if _bin not in os.environ.get("PATH", ""):
+        os.environ["PATH"] = _bin + os.pathsep + os.environ.get("PATH", "")
     print(f"[OK] ffmpeg: {FFMPEG_EXE}")
 else:
-    print("[WARN] ffmpeg no encontrado - solo se aceptaran archivos WAV")
+    print("[WARN] ffmpeg no encontrado — solo se aceptarán archivos WAV")
 
-# ──────────────────────────────────────────────────────────────
-# Tabla DTMF ITU-T Q.23
-# ──────────────────────────────────────────────────────────────
-DTMF_MAP = {
-    (697, 1209): "1", (697, 1336): "2", (697, 1477): "3", (697, 1633): "A",
-    (770, 1209): "4", (770, 1336): "5", (770, 1477): "6", (770, 1633): "B",
-    (852, 1209): "7", (852, 1336): "8", (852, 1477): "9", (852, 1633): "C",
-    (941, 1209): "*", (941, 1336): "0", (941, 1477): "#", (941, 1633): "D",
-}
-ROW_FREQS = [697, 770, 852, 941]
-COL_FREQS = [1209, 1336, 1477, 1633]
-# Mapa inverso: dígito → (f_fila, f_col) para sintetizar tono DTMF limpio en la grabación
-_DTMF_DIGIT_FREQS: dict[str, tuple[int, int]] = {v: k for k, v in DTMF_MAP.items()}
-
-# ──────────────────────────────────────────────────────────────
-# Parametros del pipeline
-# ──────────────────────────────────────────────────────────────
-TARGET_SR        = 8000
-FRAME_MS         = 40      # frames de 40 ms -> buena resolucion frecuencial
-HOP_MS           = 10
-MIN_TONE_MS      = 20      # minimo 20 ms (2 frames)
-ENERGY_THRESHOLD = 5e-7    # umbral de silencio absoluto
-AMPLIFY_DB       = 30
-
-# ---- Umbrales de dominancia espectral ----
-# Calibrados con Grabacion7.wav (audio con los 10 digitos reales):
-#   row_dom en tonos reales: 0.97 - 0.999  -> umbral 0.78 (amplio margen)
-#   col_dom en tonos reales: 0.99 - 0.999  -> umbral 0.50
-#   dom_total en reales:     0.99 - 0.999  -> umbral 0.82
-ROW_DOM_THRESHOLD   = 0.78
-COL_DOM_THRESHOLD   = 0.50
-TOTAL_DOM_THRESHOLD = 0.82
-
-# ---- Concentracion espectral DTMF (discriminador principal de voz) ----
-# Para un tono DTMF puro:
-#   2 * (P_fila + P_col) / energia_frame  ~= 0.54 - 0.86  (medido en Grabacion7)
-# Para voz: energia distribuida en cientos de frecuencias -> concentracion < 0.10
-# No necesita suprimir la voz: mide la pureza espectral objetivamente.
-CONCENTRATION_THRESHOLD = 0.15   # Mas permisivo para captacion via microfono ambiente
+# ── Tabla DTMF y parámetros: importados desde core/config.py ──
+# (ver core/config.py para calibración y comentarios)
 
 UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), "uploads")
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -164,11 +158,13 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
 
 # ══════════════════════════════════════════════
-#  PIPELINE DE AUDIO
+#  PIPELINE DE AUDIO (helpers app-specific)
+#  detect_dtmf_frame, analyze_dtmf, build_chart, bandpass_filter
+#  y amplify vienen de core.dtmf_engine (importados arriba).
 # ══════════════════════════════════════════════
 
 def convert_to_wav(src_path: str) -> str:
-    """Convierte cualquier formato a WAV 8kHz mono usando ffmpeg."""
+    """Convierte cualquier formato a WAV 8 kHz mono usando ffmpeg."""
     if not FFMPEG_EXE:
         raise RuntimeError("ffmpeg no disponible para convertir este formato.")
     dst_path = src_path + "_conv.wav"
@@ -178,12 +174,16 @@ def convert_to_wav(src_path: str) -> str:
         capture_output=True, text=True, timeout=120
     )
     if not os.path.isfile(dst_path):
-        raise RuntimeError(f"ffmpeg fallo: {result.stderr[-500:]}")
+        raise RuntimeError(f"ffmpeg falló: {result.stderr[-500:]}")
     return dst_path
 
 
 def load_audio(path: str):
-    """Carga el audio como float32 normalizado en [-1,1]."""
+    """
+    Carga el audio como float32 normalizado en [-1, 1].
+    Convierte a WAV si es necesario y resamplea a TARGET_SR.
+    Retorna (audio, sr, path_cargado).
+    """
     ext = os.path.splitext(path)[1].lower().lstrip(".")
     if ext != "wav":
         path = convert_to_wav(path)
@@ -193,22 +193,15 @@ def load_audio(path: str):
         audio = audio.mean(axis=1)
     audio = audio.astype(np.float32)
 
-    # Resamplear si no esta en TARGET_SR
     if sr != TARGET_SR:
-        g = gcd(TARGET_SR, sr)
-        audio = resample_poly(audio, TARGET_SR // g, sr // g).astype(np.float32)
+        audio = _resample_audio(audio, sr, TARGET_SR)
         sr = TARGET_SR
 
-    return audio, sr, path   # path puede haber cambiado si se convirtio
-
-
-def bandpass_filter(audio: np.ndarray, sr: int) -> np.ndarray:
-    nyq = sr / 2.0
-    sos = butter(4, [300 / nyq, 3400 / nyq], btype="band", output="sos")
-    return sosfilt(sos, audio).astype(np.float32)
+    return audio, sr, path   # path puede haber cambiado si se convirtió
 
 
 def reduce_noise_audio(audio: np.ndarray, sr: int) -> np.ndarray:
+    """Reducción de ruido con noisereduce (perfil del primer 10% de la señal)."""
     noise_len = max(int(0.1 * len(audio)), sr // 2)
     noise_clip = audio[:noise_len]
     return nr.reduce_noise(
@@ -217,227 +210,14 @@ def reduce_noise_audio(audio: np.ndarray, sr: int) -> np.ndarray:
     ).astype(np.float32)
 
 
-def amplify(audio: np.ndarray, gain_db: float) -> np.ndarray:
-    gain = 10 ** (gain_db / 20.0)
-    audio = audio * gain
-    peak = np.max(np.abs(audio))
-    if peak > 1.0:
-        audio = audio / peak
-    return audio
+def amplify(audio: np.ndarray, gain_db: float = AMPLIFY_DB) -> np.ndarray:
+    """Wrapper local de amplify para retrocompatibilidad con llamadas directas en este módulo."""
+    return _amplify_audio(audio, gain_db)
 
 
-def goertzel(samples: np.ndarray, freq: float, sr: int) -> float:
-    N = len(samples)
-    k = int(0.5 + N * freq / sr)
-    omega = 2.0 * np.pi * k / N
-    coeff = 2.0 * np.cos(omega)
-    s1 = s2 = 0.0
-    for x in samples:
-        s = x + coeff * s1 - s2
-        s2 = s1
-        s1 = s
-    return (s2 ** 2 + s1 ** 2 - coeff * s1 * s2) / (N * N)
-
-
-def detect_dtmf_frame(samples: np.ndarray, sr: int, frame_energy: float):
-    """
-    Detecta un digito DTMF usando tres filtros en cascada:
-
-    1. Dominancia espectral (row / col / total)
-       El digito DTMF debe dominar dentro de su grupo de frecuencias.
-
-    2. Concentracion espectral DTMF  <-- discriminador principal de voz
-       2*(P_fila + P_col) / energia_frame >= CONCENTRATION_THRESHOLD
-       Para DTMF real: ~0.54-0.86  |  Para voz: tipicamente < 0.10
-       No necesita suprimir la voz: mide la pureza espectral directamente.
-
-    3. Duracion minima aplicada en analyze_dtmf() via MIN_TONE_MS.
-    """
-    row_p = {f: goertzel(samples, f, sr) for f in ROW_FREQS}
-    col_p = {f: goertzel(samples, f, sr) for f in COL_FREQS}
-    total = sum(row_p.values()) + sum(col_p.values())
-    if total < 1e-14:
-        return None
-
-    br = max(row_p, key=row_p.get)
-    bc = max(col_p, key=col_p.get)
-
-    # Filtro 1 -- Dominancia dentro de cada grupo de frecuencias
-    row_dom   = row_p[br] / (sum(row_p.values()) + 1e-14)
-    col_dom   = col_p[bc] / (sum(col_p.values()) + 1e-14)
-    if row_dom < ROW_DOM_THRESHOLD or col_dom < COL_DOM_THRESHOLD:
-        return None
-
-    # Filtro 2 -- Dominio total (ambas frecuencias dominan el pool DTMF)
-    dom_total = (row_p[br] + col_p[bc]) / (total + 1e-14)
-    if dom_total < TOTAL_DOM_THRESHOLD:
-        return None
-
-    # Filtro 3 -- Concentracion espectral DTMF
-    # 2*(P_row + P_col) / frame_energy:
-    #   DTMF puro  -> 0.54 - 0.86  (casi toda la energia en 2 frecuencias)
-    #   Voz/ruido  -> < 0.10       (energia dispersa en todo el espectro)
-    concentration = 2.0 * (row_p[br] + col_p[bc]) / (frame_energy + 1e-14)
-    if concentration < CONCENTRATION_THRESHOLD:
-        return None
-
-    digit = DTMF_MAP.get((br, bc))
-    if not digit and frame_energy > 1e-5:
-        # Log si hay mucha energia pero no mapea a DTMF
-        print(f"[DEBUG-DTMF] Energia alta ({frame_energy:.2e}) pero no es DTMF. Row:{br}({row_dom:.2f}) Col:{bc}({col_dom:.2f}) Conc:{concentration:.2f}")
-
-    return digit
-
-
-def analyze_dtmf(audio: np.ndarray, sr: int):
-    """
-    Analiza el audio frame a frame y devuelve la lista de tonos DTMF.
-    El filtrado de voz se realiza dentro de detect_dtmf_frame() via
-    concentracion espectral, no por supresion de energia.
-    """
-    frame_size   = int(sr * FRAME_MS / 1000)
-    hop_size     = int(sr * HOP_MS  / 1000)
-    min_frames   = max(1, int(MIN_TONE_MS / HOP_MS))
-    total_frames = (len(audio) - frame_size) // hop_size + 1
-
-    frame_log = []
-    for i in range(total_frames):
-        start  = i * hop_size
-        frame  = audio[start: start + frame_size]
-        energy = float(np.mean(frame ** 2))
-        t      = round(i * HOP_MS / 1000.0, 3)
-
-        if energy < ENERGY_THRESHOLD:
-            frame_log.append((t, None))
-            continue
-
-        # Pasar la energia del frame al detector para el calculo de concentracion
-        digit = detect_dtmf_frame(frame, sr, energy)
-        frame_log.append((t, digit))
-
-    # Agrupar frames consecutivos con el mismo digito
-    tones = []
-    cur_digit = None
-    cur_start = 0.0
-    consec    = 0
-
-    for t, digit in frame_log:
-        if digit is not None and digit == cur_digit:
-            consec += 1
-        else:
-            if cur_digit is not None and consec >= min_frames:
-                tones.append({
-                    "digit"      : cur_digit,
-                    "start_s"    : round(cur_start, 3),
-                    "end_s"      : round(t, 3),
-                    "duration_ms": round((t - cur_start) * 1000),
-                })
-            cur_digit = digit
-            cur_start = t
-            consec    = 1 if digit else 0
-
-    if cur_digit is not None and consec >= min_frames and frame_log:
-        t_last = frame_log[-1][0]
-        tones.append({
-            "digit"      : cur_digit,
-            "start_s"    : round(cur_start, 3),
-            "end_s"      : round(t_last, 3),
-            "duration_ms": round((t_last - cur_start) * 1000),
-        })
-
-    return tones
-
-
-# ══════════════════════════════════════════════
-#  GENERACION DE GRAFICO
-# ══════════════════════════════════════════════
-
-# Colores por digito DTMF
-DIGIT_COLORS = {
-    "1":"#4fc3f7","2":"#81c784","3":"#ffb74d","4":"#ba68c8",
-    "5":"#f06292","6":"#4dd0e1","7":"#aed581","8":"#ff8a65",
-    "9":"#90caf9","0":"#a5d6a7","*":"#ffe082","#":"#ef9a9a",
-    "A":"#b39ddb","B":"#80cbc4","C":"#ffcc02","D":"#ff7043",
-}
-
-def build_chart(audio: np.ndarray, sr: int, tones: list, duration: float) -> str:
-    """Genera el grafico y lo devuelve como base64 PNG."""
-    fig, axes = plt.subplots(2, 1, figsize=(14, 7), facecolor="#0d1117")
-    fig.suptitle("Analisis de Tonos DTMF", color="white",
-                 fontsize=17, fontweight="bold", y=0.98)
-
-    time_axis = np.linspace(0, len(audio) / sr, num=len(audio))
-
-    # ── Forma de onda ──
-    ax1 = axes[0]
-    ax1.set_facecolor("#161b22")
-    ax1.plot(time_axis, audio, color="#4fc3f7", linewidth=0.4, alpha=0.85)
-    ax1.set_ylabel("Amplitud", color="#8b949e", fontsize=9)
-    ax1.set_title("Forma de onda (audio limpio + amplificado)",
-                  color="#8b949e", fontsize=9)
-    ax1.tick_params(colors="#8b949e", labelsize=8)
-    ax1.set_xlim(0, duration)
-    for sp in ax1.spines.values():
-        sp.set_color("#30363d")
-
-    y_max = max(np.max(np.abs(audio)) * 1.1, 0.01)
-    ax1.set_ylim(-y_max, y_max)
-
-    for tone in tones:
-        col = DIGIT_COLORS.get(tone["digit"], "#ffffff")
-        ax1.axvspan(tone["start_s"], tone["end_s"], alpha=0.30, color=col, zorder=2)
-        mid = (tone["start_s"] + tone["end_s"]) / 2
-        ax1.text(mid, y_max * 0.65, tone["digit"],
-                 color="white", fontsize=10, fontweight="bold",
-                 ha="center", va="center", zorder=3,
-                 bbox=dict(boxstyle="round,pad=0.25", fc=col, alpha=0.9, ec="none"))
-
-    # ── Espectrograma ──
-    ax2 = axes[1]
-    ax2.set_facecolor("#161b22")
-    try:
-        ax2.specgram(audio, NFFT=512, Fs=sr, noverlap=400,
-                     cmap="inferno", vmin=-80, vmax=0)
-    except Exception:
-        pass
-    ax2.set_ylim(0, 4000)
-    ax2.set_xlim(0, duration)
-    ax2.set_ylabel("Frecuencia (Hz)", color="#8b949e", fontsize=9)
-    ax2.set_xlabel("Tiempo (s)", color="#8b949e", fontsize=9)
-    ax2.set_title("Espectrograma 0-4 kHz  (lineas = frecuencias DTMF)",
-                  color="#8b949e", fontsize=9)
-    ax2.tick_params(colors="#8b949e", labelsize=8)
-    for sp in ax2.spines.values():
-        sp.set_color("#30363d")
-
-    for f in ROW_FREQS + COL_FREQS:
-        ax2.axhline(y=f, color="#ffffff", linewidth=0.35,
-                    linestyle="--", alpha=0.35)
-        ax2.text(0.005, f + 18, f"{f} Hz",
-                 color="#8b949e", fontsize=5.5, alpha=0.8,
-                 transform=ax2.get_yaxis_transform())
-
-    for tone in tones:
-        col = DIGIT_COLORS.get(tone["digit"], "#ffffff")
-        ax2.axvspan(tone["start_s"], tone["end_s"], alpha=0.22, color=col)
-
-    # Leyenda
-    seen = sorted(set(t["digit"] for t in tones))
-    patches = [mpatches.Patch(color=DIGIT_COLORS.get(d, "#fff"), label=f'"{d}"')
-               for d in seen]
-    if patches:
-        ax2.legend(handles=patches, loc="upper right",
-                   facecolor="#161b22", edgecolor="#30363d",
-                   labelcolor="white", fontsize=7, framealpha=0.9)
-
-    plt.tight_layout(rect=[0, 0, 1, 0.96])
-
-    buf = BytesIO()
-    plt.savefig(buf, format="png", dpi=130,
-                bbox_inches="tight", facecolor="#0d1117")
-    plt.close(fig)
-    buf.seek(0)
-    return base64.b64encode(buf.read()).decode("utf-8")
+def _get_bandpass(sr: int) -> np.ndarray:
+    """Acceso al caché de filtro pasa-banda desde core.dtmf_engine."""
+    return get_bandpass_sos(sr)
 
 
 # ══════════════════════════════════════════════
@@ -776,28 +556,61 @@ def _save_call_result(number: str, status: str, digit: str | None, notes: str = 
         ])
 
 
+# Nombre del dispositivo de salida activo al iniciar la campaña (para reinit si cambia)
+_mixer_device_name: str | None = None
+
+
+def _ensure_mixer(device_name: str | None = None) -> bool:
+    """
+    Garantiza que pygame.mixer está inicializado con el dispositivo correcto.
+    Solo reinicializa si el dispositivo cambia (evita clics entre pistas consecutivas).
+    Retorna True si el mixer está listo.
+    """
+    global _mixer_device_name
+    if not _PYGAME_OK:
+        return False
+    try:
+        current_init = pygame.mixer.get_init()
+        # Reinicializar solo si cambia el dispositivo de salida
+        if current_init and _mixer_device_name == device_name:
+            return True   # ya está en el dispositivo correcto, nada que hacer
+
+        if current_init:
+            pygame.mixer.quit()
+
+        if device_name:
+            try:
+                pygame.mixer.init(devicename=device_name)
+                _mixer_device_name = device_name
+                print(f"[Mixer] Inicializado en dispositivo: {device_name}")
+            except Exception as ex:
+                print(f"[Mixer] Fallo dispositivo '{device_name}': {ex} — usando default")
+                pygame.mixer.init()
+                _mixer_device_name = None
+        else:
+            pygame.mixer.init()
+            _mixer_device_name = None
+        return True
+    except Exception as exc:
+        print(f"[Mixer] Error de inicialización: {exc}")
+        return False
+
+
 def _play_audio(path: str, cancel_event: threading.Event = None):
     """
-    Reproduce un archivo de audio usando pygame, con soporte de dispositivo de salida.
-    Si se proporciona cancel_event y se activa, la reproducción se detiene inmediatamente
-    (útil para cortar el audio cuando el cliente cuelga durante la llamada).
+    Reproduce un archivo de audio usando pygame.
+    El mixer solo se reinicializa si el dispositivo de salida cambió desde la
+    última llamada (evita clics y crashes entre pistas consecutivas).
+    Si cancel_event se activa, detiene la reproducción inmediatamente.
     """
     if not _PYGAME_OK or not path or not os.path.isfile(path):
         return
     try:
         print(f"[IVR-Audio] Reproduciendo: {os.path.basename(path)}")
-        # Reinicializar mixer si hay dispositivo de salida específico
-        if _audio_output_device_name:
-            try:
-                if pygame.mixer.get_init():
-                    pygame.mixer.quit()
-                pygame.mixer.init(devicename=_audio_output_device_name)
-            except Exception as ex:
-                print(f"[IVR-Audio] No se pudo seleccionar salida '{_audio_output_device_name}': {ex}")
-                if not pygame.mixer.get_init():
-                    pygame.mixer.init()
-        elif not pygame.mixer.get_init():
-            pygame.mixer.init()
+
+        if not _ensure_mixer(_audio_output_device_name):
+            print("[IVR-Audio] Mixer no disponible — omitiendo audio")
+            return
 
         pygame.mixer.music.load(path)
         pygame.mixer.music.play()
@@ -813,12 +626,13 @@ def _play_audio(path: str, cancel_event: threading.Event = None):
         while pygame.mixer.music.get_busy() and (time.time() - start) < 60:
             if cancel_event and cancel_event.is_set():
                 pygame.mixer.music.stop()
-                print(f"[IVR-Audio] Reproducción cancelada (llamada terminada): {os.path.basename(path)}")
+                print(f"[IVR-Audio] Reproducción cancelada: {os.path.basename(path)}")
                 return
-            time.sleep(0.1)
-        print(f"[IVR-Audio] Fin reproduccion: {os.path.basename(path)}")
+            time.sleep(0.05)   # 50ms poll — antes era 100ms (más responsivo al cuelgue)
+        print(f"[IVR-Audio] Fin: {os.path.basename(path)}")
     except Exception as exc:
         print(f"[IVR] Error reproduciendo audio: {exc}")
+
 
 
 def _emit_ivr(event: str, data: dict):
@@ -1090,28 +904,24 @@ class PreCallAudioAnalyzer(threading.Thread):
     Resultado:
       self.ring_count     (int)  — número de rings completos detectados
       self.operator_voice (bool) — True si se detectó voz del operador
+
+    Todos los parámetros se toman de core.config (fuente única de verdad).
     """
 
-    # ── Parámetros de análisis ─────────────────────────────────────
-    FRAME_MS     = 100          # ms por ventana de análisis
-    # Frecuencias típicas de ring tone (Hz) — Colombia: ~425 Hz
-    RING_FREQS   = [400, 425, 440, 450]
-    RING_E_THR   = 5e-5         # energía mínima para procesar el frame
-    FLAT_TONE    = 0.12         # spectral flatness ≤ → frame tonal (ring)
-    FLAT_VOICE   = 0.22         # spectral flatness ≥ → frame broadband (voz)
-    ZCR_VOICE    = 0.07         # ZCR normalizado ≥ → componente vocal
-    RING_ON_MIN  = 0.7          # duración mínima burst de ring (s)
-    RING_ON_MAX  = 3.2          # duración máxima burst de ring (s)
-    RING_OFF_MIN = 1.2          # silencio mínimo entre rings (s)
-    # Voz del operador — detector espectral:
-    VOICE_SUSTAINED_MIN = 2.0   # segundos consecutivos de 'voz' (flatness+ZCR) para operator_voice
-    # Voz del operador — detector por energía (método alternativo/paralelo):
-    # Un operador o buzon genera energía constante desde el primer momento.
-    # Un número en silencio (apagado sin operador) tiene energía 0.
-    # Se activa si RMS >= ENERGY_THR_SIGNAL durante ENERGY_SUSTAINED_MIN seg. consecutivos.
-    ENERGY_THR_SIGNAL    = 8e-3  # RMS mínimo para considerar 'hay señal' (calibrar con viz)
-    ENERGY_SUSTAINED_MIN = 2.0   # segundos consecutivos de señal sostenida
-    MAX_RINGS    = 2             # límite de rings para clasificar como UNAVAILABLE
+    # ── Parámetros — desde core.config (no duplicar aquí) ────────────────────
+    FRAME_MS          = PRECALL_FRAME_MS       # ms por ventana de análisis
+    RING_FREQS        = RING_FREQS             # Hz — Colombia: ~425 Hz
+    RING_E_THR        = RING_E_THR             # energía mínima para procesar el frame
+    FLAT_TONE         = FLAT_TONE              # spectral flatness ≤ → frame tonal
+    FLAT_VOICE        = FLAT_VOICE             # spectral flatness ≥ → frame broadband
+    ZCR_VOICE         = ZCR_VOICE              # ZCR normalizado ≥ → componente vocal
+    RING_ON_MIN       = RING_ON_MIN            # s — duración mínima burst de ring
+    RING_ON_MAX       = RING_ON_MAX            # s — duración máxima burst de ring
+    RING_OFF_MIN      = RING_OFF_MIN           # s — silencio mínimo entre rings
+    VOICE_SUSTAINED_MIN = VOICE_SUSTAINED_MIN  # s de voz continua → operador
+    ENERGY_THR_SIGNAL = ENERGY_THR_SIGNAL      # RMS mínimo para 'hay señal'
+    ENERGY_SUSTAINED_MIN = ENERGY_SUSTAINED_MIN # s de señal sostenida → operador
+    MAX_RINGS         = MAX_RINGS              # límite de rings para UNAVAILABLE
 
     def __init__(self, device_index=None):
         super().__init__(daemon=True, name="PreCallAudioAnalyzer")
@@ -1291,64 +1101,81 @@ class PreCallAudioAnalyzer(threading.Thread):
 
         print(f"[PreCall] Iniciado — dispositivo idx={self.device_index} @ {sr_native} Hz")
 
-        try:
-            with sd.InputStream(
-                device      = self.device_index,
-                channels    = 1,
-                samplerate  = sr_native,
-                blocksize   = frame_samples_native,
-                dtype       = "float32",
-            ) as stream:
-                while not self._stop_ev.is_set():
-                    data, _ = stream.read(frame_samples_native)
-                    if self._stop_ev.is_set():
-                        break
+        # ── Abrir stream con retry (WASAPI puede tardar en liberar el device) ──
+        max_retries = 4
+        retry_delay = 0.3
+        last_exc    = None
 
-                    chunk = data[:, 0].astype(np.float32)
+        for attempt in range(1, max_retries + 1):
+            if self._stop_ev.is_set():
+                break
+            try:
+                with sd.InputStream(
+                    device     = self.device_index,
+                    channels   = 1,
+                    samplerate = sr_native,
+                    blocksize  = frame_samples_native,
+                    dtype      = "float32",
+                ) as stream:
+                    while not self._stop_ev.is_set():
+                        data, _ = stream.read(frame_samples_native)
+                        if self._stop_ev.is_set():
+                            break
 
-                    # Resamplear a 8 kHz para análisis
-                    if sr_native != TARGET_SR:
-                        g     = gcd(TARGET_SR, sr_native)
-                        chunk = resample_poly(
-                            chunk, TARGET_SR // g, sr_native // g
-                        ).astype(np.float32)
+                        chunk = data[:, 0].astype(np.float32)
 
-                    # Tomar exactamente frame_samples_8k muestras
-                    if len(chunk) > frame_samples_8k:
-                        chunk = chunk[:frame_samples_8k]
-                    elif len(chunk) < frame_samples_8k // 2:
-                        continue
+                        # Resamplear a 8 kHz para análisis
+                        if sr_native != TARGET_SR:
+                            g     = gcd(TARGET_SR, sr_native)
+                            chunk = resample_poly(
+                                chunk, TARGET_SR // g, sr_native // g
+                            ).astype(np.float32)
 
-                    energy   = float(np.mean(chunk ** 2))
-                    ring_e   = self._goertzel_ring_energy(chunk, TARGET_SR)
-                    flatness = self._spectral_flatness(chunk)
-                    zcr      = self._zcr(chunk)
+                        # Tomar exactamente frame_samples_8k muestras
+                        if len(chunk) > frame_samples_8k:
+                            chunk = chunk[:frame_samples_8k]
+                        elif len(chunk) < frame_samples_8k // 2:
+                            continue
 
-                    cls = self._classify_frame(energy, ring_e, flatness, zcr)
-                    now = time.time()
+                        energy   = float(np.mean(chunk ** 2))
+                        ring_e   = self._goertzel_ring_energy(chunk, TARGET_SR)
+                        flatness = self._spectral_flatness(chunk)
+                        zcr      = self._zcr(chunk)
 
-                    self._update_ring_state(cls, now)
-                    self._update_vad(cls)            # Método 1: espectral
-                    self._update_energy_vad(energy)  # Método 2: energía sostenida
+                        cls = self._classify_frame(energy, ring_e, flatness, zcr)
+                        now = time.time()
 
-                    # ── Alimentar grabador con audio de DIALING ─────────────
-                    if _active_recorder is not None:
-                        raw_ch = data[:, 0].astype(np.float32) if data.ndim > 1 else data.astype(np.float32)
-                        if cls == "ring":
-                            # Sustituir audio crudo por tono puro de 425 Hz (ring tone Colombia)
-                            n  = len(raw_ch)
-                            t  = np.arange(n, dtype=np.float32) / sr_native
-                            synth_ring = (0.45 * np.sin(2.0 * np.pi * 425.0 * t)).astype(np.float32)
-                            _active_recorder.feed(synth_ring, sr_native)
-                        else:
-                            _active_recorder.feed(raw_ch, sr_native)
+                        self._update_ring_state(cls, now)
+                        self._update_vad(cls)            # Método 1: espectral
+                        self._update_energy_vad(energy)  # Método 2: energía sostenida
 
-                    # ── Visualizador: emitir RMS al canal 'input' (~10 Hz) ──
-                    rms = float(np.sqrt(energy))
-                    socketio.emit("audio_viz", {"ch": "input", "rms": rms})
+                        # ── Alimentar grabador con audio de DIALING ─────────────
+                        if _active_recorder is not None:
+                            raw_ch = data[:, 0].astype(np.float32) if data.ndim > 1 else data.astype(np.float32)
+                            if cls == "ring":
+                                n  = len(raw_ch)
+                                t  = np.arange(n, dtype=np.float32) / sr_native
+                                synth_ring = (0.45 * np.sin(2.0 * np.pi * 425.0 * t)).astype(np.float32)
+                                _active_recorder.feed(synth_ring, sr_native)
+                            else:
+                                _active_recorder.feed(raw_ch, sr_native)
 
-        except Exception as exc:
-            print(f"[PreCall] Error en captura: {exc}")
+                        # ── Visualizador: emitir RMS al canal 'input' (~10 Hz) ──
+                        rms = float(np.sqrt(energy))
+                        socketio.emit("audio_viz", {"ch": "input", "rms": rms})
+
+                break   # stream cerrado limpiamente — salir del retry loop
+
+            except Exception as exc:
+                last_exc = exc
+                if self._stop_ev.is_set():
+                    break
+                print(f"[PreCall] Intento {attempt}/{max_retries} fallido: {exc}")
+                if attempt < max_retries:
+                    time.sleep(retry_delay)
+                    retry_delay *= 1.5
+                else:
+                    print(f"[PreCall] ❌ Sin stream tras {max_retries} intentos: {last_exc}")
 
         print(f"[PreCall] Detenido — rings={self.ring_count} voice={self.operator_voice}")
 
@@ -1373,16 +1200,16 @@ class IVRCampaign(threading.Thread):
         self.total         = len(self.queue)
         self.processed     = 0
         self.device_id     = config.get("device_id")
-        self.delay_s       = float(config.get("delay_seconds", 5))
-        self.audio_welcome  = config.get("audio_welcome")
-        self.audio_menu     = config.get("audio_menu")
-        self.audio_bye      = config.get("audio_bye")
-        self.audio_no_tone  = config.get("audio_no_tone")
-        self.ivr_options    = config.get("ivr_options", {})
-        self.tone_timeout   = float(config.get("tone_timeout", 10))
-        self.menu_repeats   = int(config.get("menu_repeats", 2))
-        self.record_calls   = bool(config.get("record_calls", False))  # grabar llamadas contestadas
-        self.is_test        = config.get("is_test", False)
+        self.delay_s       = float(config.get("delay_seconds",  IVR_DEFAULT_DELAY_S))
+        self.audio_welcome = config.get("audio_welcome")
+        self.audio_menu    = config.get("audio_menu")
+        self.audio_bye     = config.get("audio_bye")
+        self.audio_no_tone = config.get("audio_no_tone")
+        self.ivr_options   = config.get("ivr_options", {})
+        self.tone_timeout  = float(config.get("tone_timeout",  IVR_DEFAULT_TONE_TIMEOUT))
+        self.menu_repeats  = int(config.get("menu_repeats",   IVR_DEFAULT_MENU_REPEATS))
+        self.record_calls  = bool(config.get("record_calls",  False))
+        self.is_test       = config.get("is_test", False)
 
         self._stop_event   = threading.Event()
         self._pause_event  = threading.Event()
@@ -1466,12 +1293,19 @@ class IVRCampaign(threading.Thread):
 
         pre_call = None
         if _SD_OK and _audio_monitor_device is not None:
+            # Detener el visualizador idle (_input_viz) si está usando el mismo
+            # dispositivo de entrada — Windows WASAPI no permite dos streams al mismo tiempo.
+            if _input_viz and _input_viz.is_alive():
+                print("[IVR] Parando InputVizMonitor antes de PreCallAnalyzer...")
+                _stop_all_input_monitors(join=True)
+
             pre_call = PreCallAudioAnalyzer(device_index=_audio_monitor_device)
             pre_call.start()
             _emit_ivr("ivr_log", {
                 "msg": "  🔍 Analizando audio pre-llamada (ring/voz)...",
                 "level": "info"
             })
+
 
         _emit_ivr("ivr_log", {"msg": f"📞 Marcando: {number}", "level": "info"})
 
@@ -1960,17 +1794,42 @@ class PythonAudioMonitor(threading.Thread):
             if len(self._buf) > self.WINDOW * 4:
                 self._buf = self._buf[-self.WINDOW:]
 
-        try:
-            with sd.InputStream(
-                device=self.device_index,
-                channels=1,
-                samplerate=sr_native,
-                blocksize=int(sr_native * 0.04),
-                callback=callback,
-            ):
-                self._stop_ev.wait()
-        except Exception as exc:
-            _emit_ivr("ivr_log", {"msg": f"❌ Error en monitor de audio: {exc}", "level": "error"})
+        # ── Abrir stream con retry (WASAPI puede tardar en liberar el device) ──
+        max_retries = 4
+        retry_delay = 0.3   # segundos entre intentos
+        last_exc    = None
+
+        for attempt in range(1, max_retries + 1):
+            try:
+                with sd.InputStream(
+                    device    = self.device_index,
+                    channels  = 1,
+                    samplerate= sr_native,
+                    blocksize = int(sr_native * 0.04),   # 40ms
+                    dtype     = "float32",
+                    callback  = callback,
+                ):
+                    if attempt > 1:
+                        _emit_ivr("ivr_log", {
+                            "msg":   f"🎤 Stream abierto (intento {attempt})",
+                            "level": "success",
+                        })
+                    self._stop_ev.wait()
+                break   # stream cerrado limpiamente — salir del retry loop
+
+            except Exception as exc:
+                last_exc = exc
+                if self._stop_ev.is_set():
+                    break   # parada solicitada — no reintentar
+                print(f"[AudioMonitor] Intento {attempt}/{max_retries} fallido: {exc}")
+                if attempt < max_retries:
+                    time.sleep(retry_delay)
+                    retry_delay *= 1.5   # backoff exponencial
+                else:
+                    _emit_ivr("ivr_log", {
+                        "msg":   f"❌ Monitor audio: sin stream tras {max_retries} intentos — {last_exc}",
+                        "level": "error",
+                    })
 
         _emit_ivr("ivr_log", {"msg": "🔇 Monitor de audio detenido", "level": "info"})
 
@@ -2068,29 +1927,95 @@ class InputVizMonitor(threading.Thread):
             print(f"[InputViz] {exc}")
 
 
-def start_audio_monitor(device_index=None):
-    global _audio_monitor_thread, _loopback_viz
+# ── Tiempo de cortesia entre stop y start de un stream (ms) ───────────────────
+# Windows WASAPI necesita ~150-200ms para liberar el dispositivo tras close().
+# Sin este delay, el siguiente open() falla silenciosamente o usa el dispositivo
+# default en lugar del configurado.
+_STREAM_RELEASE_SLEEP = 0.25   # segundos
+_STREAM_JOIN_TIMEOUT  = 5.0    # segundos (antes era 2.0, insuficiente en WASAPI)
+
+
+def _stop_all_input_monitors(join: bool = True) -> None:
+    """
+    Detiene TODOS los monitores de entrada activos antes de abrir uno nuevo.
+    Garantiza que el dispositivo de entrada quede libre en el OS.
+
+    Monitores gestionados:
+      _audio_monitor_thread  (PythonAudioMonitor  — DTMF durante llamada)
+      _input_viz             (InputVizMonitor     — visualizador idle)
+
+    El join tiene timeout _STREAM_JOIN_TIMEOUT para no bloquear indefinidamente.
+    Tras el join se espera _STREAM_RELEASE_SLEEP para que el OS libere WASAPI.
+    """
+    global _audio_monitor_thread, _input_viz
+
+    stopped_any = False
+
     if _audio_monitor_thread and _audio_monitor_thread.is_alive():
         _audio_monitor_thread.stop()
-        _audio_monitor_thread.join(timeout=2)
+        if join:
+            _audio_monitor_thread.join(timeout=_STREAM_JOIN_TIMEOUT)
+        _audio_monitor_thread = None
+        stopped_any = True
+
+    if _input_viz and _input_viz.is_alive():
+        _input_viz.stop()
+        if join:
+            _input_viz.join(timeout=_STREAM_JOIN_TIMEOUT)
+        _input_viz = None
+        stopped_any = True
+
+    if stopped_any:
+        # Dar tiempo al OS para liberar el handle WASAPI antes del siguiente open()
+        time.sleep(_STREAM_RELEASE_SLEEP)
+
+
+def _stop_all_output_monitors(join: bool = True) -> None:
+    """
+    Detiene TODOS los monitores de salida activos (loopback WASAPI).
+    Necesario antes de abrir un nuevo LoopbackEnergyMonitor o reproducir con pygame.
+    """
+    global _loopback_viz
+
+    if _loopback_viz and _loopback_viz.is_alive():
+        _loopback_viz.stop()
+        if join:
+            _loopback_viz.join(timeout=_STREAM_JOIN_TIMEOUT)
+        _loopback_viz = None
+        time.sleep(_STREAM_RELEASE_SLEEP)
+
+
+def start_audio_monitor(device_index=None):
+    """
+    Inicia el PythonAudioMonitor para captura DTMF durante la llamada.
+
+    Antes de abrir el nuevo stream:
+      1. Para _audio_monitor_thread (si existe)
+      2. Para _input_viz (MISMO dispositivo — conflicto WASAPI)
+      3. Espera _STREAM_RELEASE_SLEEP para que el OS libere el handle
+
+    El LoopbackEnergyMonitor (salida) se reinicia solo si hay dispositivo configurado.
+    """
+    global _audio_monitor_thread, _loopback_viz
+
+    # Detener TODOS los streams de entrada (evitar conflicto de dispositivo)
+    _stop_all_input_monitors(join=True)
+
+    # Iniciar PythonAudioMonitor (con retry incorporado en su run())
     _audio_monitor_thread = PythonAudioMonitor(device_index)
     _audio_monitor_thread.start()
-    # Iniciar visualizador de salida (loopback) si hay dispositivo configurado
+
+    # Iniciar LoopbackEnergyMonitor (canal de salida) si hay dispositivo
     if _audio_output_device_index is not None:
-        if _loopback_viz and _loopback_viz.is_alive():
-            _loopback_viz.stop()
+        _stop_all_output_monitors(join=True)
         _loopback_viz = LoopbackEnergyMonitor(_audio_output_device_index)
         _loopback_viz.start()
 
 
 def stop_audio_monitor():
-    global _audio_monitor_thread, _loopback_viz
-    if _audio_monitor_thread:
-        _audio_monitor_thread.stop()
-        _audio_monitor_thread = None
-    if _loopback_viz:
-        _loopback_viz.stop()
-        _loopback_viz = None
+    """Detiene monitor DTMF y visualizador loopback de salida."""
+    _stop_all_input_monitors(join=False)   # no bloquear — la llamada ya terminó
+    _stop_all_output_monitors(join=False)
 
 
 @app.route("/ivr/viz/start", methods=["POST"])
@@ -2124,14 +2049,13 @@ def ivr_viz_start():
 
 @app.route("/ivr/viz/stop", methods=["POST"])
 def ivr_viz_stop():
-    """Detiene los monitores de visualización de audio."""
-    global _input_viz, _loopback_viz
-    if _input_viz:
-        _input_viz.stop()
-        _input_viz = None
-    if _loopback_viz:
-        _loopback_viz.stop()
-        _loopback_viz = None
+    """
+    Detiene los monitores de visualización de audio.
+    Hace join real (con timeout) para que el OS libere el device
+    antes de que el cliente vuelva a llamar a /ivr/viz/start.
+    """
+    _stop_all_input_monitors(join=True)
+    _stop_all_output_monitors(join=True)
     return jsonify({"ok": True})
 
 
@@ -2457,6 +2381,13 @@ def ivr_start():
         if _ivr_campaign and _ivr_campaign.is_running:
             return jsonify({"ok": False, "error": "Ya hay una campaña activa"}), 409
 
+    # ── Guard: no permitir campaña si hay llamada manual en curso ────────
+    if _manual_call and _manual_call.is_active:
+        return jsonify({
+            "ok":    False,
+            "error": "Hay una llamada manual en curso. Cuelga primero antes de iniciar una campaña."
+        }), 409
+
     data = request.get_json(force=True) or {}
 
     numbers = data.get("numbers", [])
@@ -2576,6 +2507,263 @@ def ivr_results():
     from flask import send_file
     return send_file(IVR_RESULTS_CSV, as_attachment=True,
                      download_name="ivr_results.csv", mimetype="text/csv")
+
+
+# ══════════════════════════════════════════════
+#  MARCACIÓN MANUAL
+# ══════════════════════════════════════════════
+
+_manual_call: "ManualCallSession | None" = None
+_manual_lock = threading.Lock()
+
+
+class ManualCallSession(threading.Thread):
+    """
+    Gestiona una llamada manual única:
+      - Marca el número vía ADB
+      - Monitorea el estado con CallMonitor
+      - Activa audio monitor DTMF (mismo que campaña)
+      - Permite colgar desde la UI
+      - Emite eventos Socket.IO: manual_state, manual_log
+
+    NO puede iniciarse si hay una campaña activa (→ guard en ruta).
+    """
+
+    def __init__(
+        self,
+        number: str,
+        device_id: str | None,
+        audio_input: int | None,
+        audio_output_idx: int | None,
+        audio_output_name: str | None,
+    ):
+        super().__init__(daemon=True, name="ManualCall")
+        self.number            = number
+        self.device_id         = device_id
+        self.audio_input       = audio_input
+        self.audio_output_idx  = audio_output_idx
+        self.audio_output_name = audio_output_name
+
+        self.state      = "IDLE"   # IDLE | DIALING | ACTIVE | ENDED | ERROR
+        self.is_active  = False    # True mientras la llamada está en curso
+        self._stop_ev   = threading.Event()
+        self._hangup_ev = threading.Event()
+
+    # ── helpers internos ─────────────────────────────────────────
+
+    def _log(self, msg: str, level: str = "info"):
+        """Emite un mensaje al log de marcación manual en la UI."""
+        print(f"[Manual] {msg}")
+        socketio.emit("manual_log", {"msg": msg, "level": level, "ts": time.time()})
+
+    def _set_state(self, state: str):
+        """Actualiza el estado y lo emite a la UI."""
+        self.state = state
+        socketio.emit("manual_state", {
+            "state":  state,
+            "number": self.number,
+        })
+
+    def _adb(self, *args: str):
+        cmd = ["adb"]
+        if self.device_id:
+            cmd += ["-s", self.device_id]
+        cmd += list(args)
+        return subprocess.run(cmd, capture_output=True, timeout=10)
+
+    def _hang_up(self):
+        try:
+            self._adb("shell", "input", "keyevent", "6")  # KEYCODE_ENDCALL
+        except Exception:
+            pass
+
+    def hangup(self):
+        """Solicita colgar la llamada desde fuera del hilo."""
+        self._hangup_ev.set()
+        self._stop_ev.set()
+
+    # ── hilo principal ────────────────────────────────────────────
+
+    def run(self):
+        global _audio_monitor_device, _audio_output_device_name, _audio_output_device_index
+
+        # Registrar dispositivos de audio para uso en start_audio_monitor
+        _audio_monitor_device      = self.audio_input
+        _audio_output_device_index = self.audio_output_idx
+        _audio_output_device_name  = self.audio_output_name
+
+        self.is_active = True
+        self._set_state("DIALING")
+        self._log(f"📞 Marcando: {self.number}", "info")
+
+        # ─ 1. Marcar ───────────────────────────────────────────
+        try:
+            self._adb("shell", "am", "start", "-a",
+                      "android.intent.action.CALL", "-d", f"tel:{self.number}")
+        except Exception as exc:
+            self._log(f"❌ Error ADB al marcar: {exc}", "error")
+            self._set_state("ERROR")
+            self.is_active = False
+            return
+
+        # ─ 2. Monitorear estado vía logcat ───────────────────────
+        call_active_ev = threading.Event()
+        disconn_ev     = threading.Event()
+        monitor_stop   = threading.Event()
+        call_state     = {"current": "CONNECTING"}
+
+        def on_state(state: str):
+            call_state["current"] = state
+            self._log(f"  → Estado: {state}", "info")
+
+            if state in ("DIALING", "CONNECTING", "RINGING"):
+                self._set_state("DIALING")
+
+            elif state == "ACTIVE":
+                call_active_ev.set()
+                self._set_state("ACTIVE")
+
+            elif state in ("DISCONNECTED", "TIMEOUT"):
+                disconn_ev.set()
+                call_active_ev.set()  # desbloquear espera
+                self._set_state("ENDED")
+
+        if _MONITOR_OK:
+            monitor = CallMonitor(
+                device_id=self.device_id,
+                timeout_s=CALL_MONITOR_TIMEOUT_S,
+            )
+            monitor.start(on_state_change=on_state, stop_event=monitor_stop)
+        else:
+            self._log("⚠️ CallMonitor no disponible — esperando 10s", "warn")
+            monitor = None
+
+        # Esperar ACTIVE, DISCONNECTED o hangup manual (timeout 90s)
+        deadline = time.time() + IVR_DIAL_TIMEOUT
+        while not call_active_ev.is_set() and not self._hangup_ev.is_set():
+            if time.time() > deadline:
+                self._log("❌ Timeout esperando conexión", "error")
+                self._set_state("ERROR")
+                self._hang_up()
+                break
+            time.sleep(0.3)
+
+        if self._hangup_ev.is_set() and not call_active_ev.is_set():
+            self._log("🔴 Llamada cancelada por el usuario", "warn")
+            self._hang_up()
+            monitor_stop.set()
+            self._set_state("ENDED")
+            self.is_active = False
+            return
+
+        if disconn_ev.is_set():
+            self._log("📥 Llamada terminada antes de contestar", "warn")
+            monitor_stop.set()
+            self._set_state("ENDED")
+            self.is_active = False
+            return
+
+        # ─ 3. ACTIVE — activar monitor de audio DTMF ────────────────
+        self._log("✅ Llamada contestada — monitor DTMF activo", "success")
+        start_audio_monitor(self.audio_input)
+
+        # Esperar hasta que el usuario cuelgue o la llamada termine
+        while not self._hangup_ev.is_set() and not disconn_ev.is_set():
+            time.sleep(0.3)
+
+        # ─ 4. Colgar y limpiar ─────────────────────────────────
+        if self._hangup_ev.is_set():
+            self._log("🔴 Colgando llamada...", "warn")
+            self._hang_up()
+
+        monitor_stop.set()
+        stop_audio_monitor()
+        self._set_state("ENDED")
+        self.is_active = False
+        self._log("✓ Llamada manual finalizada", "info")
+
+
+# ── Rutas de marcación manual ───────────────────────────────────
+
+@app.route("/ivr/manual/dial", methods=["POST"])
+def manual_dial():
+    """Inicia una llamada manual a un número."""
+    global _manual_call
+
+    # Guard 1: campaña activa
+    with _ivr_lock:
+        if _ivr_campaign and _ivr_campaign.is_running:
+            return jsonify({
+                "ok":    False,
+                "error": "Hay una campaña automática en curso. Deténla primero."
+            }), 409
+
+    # Guard 2: llamada manual ya activa
+    with _manual_lock:
+        if _manual_call and _manual_call.is_active:
+            return jsonify({
+                "ok":    False,
+                "error": "Ya hay una llamada manual en curso. Cuelga antes de marcar."
+            }), 409
+
+    data   = request.get_json(force=True) or {}
+    number = str(data.get("number", "")).strip()
+
+    # Validar número
+    digits_only = number.replace("+", "").replace("-", "").replace(" ", "")
+    if not number or not digits_only.isdigit() or len(digits_only) < 6:
+        return jsonify({"ok": False, "error": "Número inválido (mínimo 6 dígitos)"}), 400
+
+    # Validar dispositivo ADB
+    device_id = data.get("device_id") or None
+    if not device_id:
+        return jsonify({"ok": False, "error": "Selecciona un dispositivo ADB antes de marcar"}), 400
+
+    # Dispositivos de audio (opcionales — solo advertencia)
+    audio_input      = data.get("audio_device")
+    audio_output_idx = data.get("audio_output_device")
+    audio_output_name = None
+
+    if audio_output_idx is not None and _SD_OK:
+        try:
+            audio_output_name = sd.query_devices(int(audio_output_idx))["name"]
+        except Exception:
+            audio_output_name = None
+
+    with _manual_lock:
+        _manual_call = ManualCallSession(
+            number           = number,
+            device_id        = device_id,
+            audio_input      = audio_input,
+            audio_output_idx = int(audio_output_idx) if audio_output_idx is not None else None,
+            audio_output_name= audio_output_name,
+        )
+        _manual_call.start()
+
+    return jsonify({"ok": True, "number": number})
+
+
+@app.route("/ivr/manual/hangup", methods=["POST"])
+def manual_hangup():
+    """Cuelga la llamada manual activa."""
+    with _manual_lock:
+        if not _manual_call or not _manual_call.is_active:
+            return jsonify({"ok": False, "error": "No hay llamada manual activa"}), 404
+        _manual_call.hangup()
+    return jsonify({"ok": True})
+
+
+@app.route("/ivr/manual/status")
+def manual_status():
+    """Retorna el estado actual de la llamada manual."""
+    with _manual_lock:
+        if not _manual_call:
+            return jsonify({"active": False, "state": "IDLE", "number": None})
+        return jsonify({
+            "active": _manual_call.is_active,
+            "state":  _manual_call.state,
+            "number": _manual_call.number,
+        })
 
 
 if __name__ == "__main__":
