@@ -1107,12 +1107,15 @@ function _onBridgeState(state) {
     const audIn  = s.audio_in_idx  != null ? 'in:'+s.audio_in_idx  : '?';
     const audOut = s.audio_out_idx != null ? 'out:'+s.audio_out_idx : '?';
     const audWarn = s.audio_in_idx == null ? ' warn' : '';
+    const numbersCount = (s.numbers && s.numbers.length) ? s.numbers.length : (s.total || 0);
+    const baseLabel = numbersCount > 0 ? `📂 Base (${numbersCount})` : '📂 Cargar Base';
     card.innerHTML = `<div class="sc-head"><div class="sc-dot ${status}"></div><div class="sc-label">${s.label}</div><div class="sc-sid">${s.session_id}</div></div>
 <div class="sc-meta"><span class="sc-tag adb">📱 ${s.device_id||'—'}</span><span class="sc-tag aud${audWarn}">🎤 ${audIn} 🔊 ${audOut}</span><span class="sc-tag">${s.status}</span>${s.last_number?`<span class="sc-tag">📞 ${s.last_number}</span>`:''}</div>
 <div class="sc-progress"><div class="sc-progress-fill" style="width:${pct}%"></div></div>
 <div class="sc-progress-txt">${s.processed}/${s.total} (${pct}%)</div>
 <div class="sc-log" id="sclog-${s.session_id}"></div>
-<div class="sc-btns">${_cardBtns(s)}</div>`;
+<input type="file" id="excel-input-${s.session_id}" accept=".xlsx,.xls,.csv" style="display:none" onchange="loadExcelForSession('${s.session_id}', this)">
+<div class="sc-btns">${_cardBtns(s)}<button class="xbtn xb" onclick="document.getElementById('excel-input-${s.session_id}').click()">${baseLabel}</button></div>`;
   }
 
   function _cardBtns(s) {
@@ -1124,6 +1127,74 @@ function _onBridgeState(state) {
     if(!['RUNNING','PAUSED','PROBING'].includes(st)) b.push(`<button class="xbtn xr" onclick="sessionDelete('${sid}')">🗑 Eliminar</button>`);
     b.push(`<button class="xbtn xa" onclick="sessionProbe('${sid}')">🔍 Canal</button>`);
     return b.join('');
+  }
+
+  // ── Carga de base Excel por sesión ───────────────────────────
+  window.loadExcelForSession = async function(sessionId, inputEl) {
+    const file = inputEl.files[0];
+    if (!file) return;
+    const card = $h('scard-' + sessionId);
+    const logEl = $h('sclog-' + sessionId);
+    // Buscar botón de base para feedback
+    const baseBtns = card ? card.querySelectorAll('.xbtn.xb') : [];
+    const baseBtn = baseBtns.length ? baseBtns[0] : null;
+    if (baseBtn) { baseBtn.disabled = true; baseBtn.textContent = '⏳ Leyendo...'; }
+
+    try {
+      const numbers = await _parseExcel(file);
+      if (!numbers.length) {
+        if (logEl) { const l=document.createElement('div'); l.className='sc-log-line error'; l.textContent=`[${fmtT()}] ❌ No se encontraron números en el archivo (busca columna "Celular", "celular", "telefono" o "numero")`; logEl.prepend(l); }
+        if (baseBtn) { baseBtn.disabled=false; baseBtn.textContent='📂 Cargar Base'; }
+        inputEl.value='';
+        return;
+      }
+      // Enviar al backend
+      const r = await fetch(`/ivr/sessions/${sessionId}`, {
+        method: 'PATCH',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({numbers})
+      });
+      const d = await r.json();
+      if (!d.ok) throw new Error(d.error||'Error del servidor');
+      // Actualizar estado local y UI
+      if (_sessions[sessionId]) { _sessions[sessionId].numbers = numbers; _sessions[sessionId].total = numbers.length; _sessions[sessionId].processed = 0; }
+      renderSessionCard(_sessions[sessionId] || {session_id: sessionId, total: numbers.length, processed: 0});
+      if (logEl) { const l=document.createElement('div'); l.className='sc-log-line ok'; l.textContent=`[${fmtT()}] ✅ Base cargada: ${numbers.length} números desde "${file.name}"`; logEl.prepend(l); }
+    } catch(e) {
+      if (logEl) { const l=document.createElement('div'); l.className='sc-log-line error'; l.textContent=`[${fmtT()}] ❌ Error: ${e.message}`; logEl.prepend(l); }
+      if (baseBtn) { baseBtn.disabled=false; baseBtn.textContent='📂 Cargar Base'; }
+    } finally {
+      inputEl.value = '';
+    }
+  };
+
+  function _parseExcel(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = evt => {
+        try {
+          const wb = XLSX.read(evt.target.result, {type: 'array'});
+          const ws = wb.Sheets[wb.SheetNames[0]];
+          const rows = XLSX.utils.sheet_to_json(ws, {header:1, raw:false});
+          if (!rows.length) { resolve([]); return; }
+          // Detectar columna: Celular, celular, Telefono, telefono, Numero, numero, Phone, phone
+          const KEYS = ['celular','telefono','numero','phone','mobile','cel','tel'];
+          const header = rows[0].map(h => String(h||'').toLowerCase().trim());
+          let colIdx = -1;
+          for (const key of KEYS) { const i = header.findIndex(h => h.includes(key)); if (i >= 0) { colIdx = i; break; } }
+          let nums;
+          if (colIdx >= 0) {
+            nums = rows.slice(1).map(r => String(r[colIdx]||'').trim()).filter(v => v.length >= 7);
+          } else {
+            // Sin cabecera reconocible → usar primera columna
+            nums = rows.slice(1).map(r => String(r[0]||'').trim()).filter(v => /^[0-9+\s\-().]{7,}$/.test(v));
+          }
+          resolve(nums);
+        } catch(e) { reject(e); }
+      };
+      reader.onerror = () => reject(new Error('Error leyendo el archivo'));
+      reader.readAsArrayBuffer(file);
+    });
   }
 
   function toggleEmpty() {
