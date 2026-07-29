@@ -2592,10 +2592,20 @@ class ManualCallSession(threading.Thread):
     def run(self):
         global _audio_monitor_device, _audio_output_device_name, _audio_output_device_index
 
-        # Registrar dispositivos de audio para uso en start_audio_monitor
-        _audio_monitor_device      = self.audio_input
-        _audio_output_device_index = self.audio_output_idx
+        # Convertir a int si llegan como string (JSON puede enviarlos como str)
+        audio_in  = int(self.audio_input)       if self.audio_input       is not None else None
+        audio_out = int(self.audio_output_idx)  if self.audio_output_idx  is not None else None
+
+        # Registrar dispositivos de audio en globals para que _play_audio y
+        # start_audio_monitor los usen igual que en una campaña automática
+        _audio_monitor_device      = audio_in
+        _audio_output_device_index = audio_out
         _audio_output_device_name  = self.audio_output_name
+
+        # Inicializar mixer pygame con el dispositivo de salida correcto
+        # (igual que hace IVRCampaign antes de reproducir audios)
+        if _PYGAME_OK:
+            _ensure_mixer(self.audio_output_name)
 
         self.is_active = True
         self._set_state("DIALING")
@@ -2670,7 +2680,7 @@ class ManualCallSession(threading.Thread):
 
         # ─ 3. ACTIVE — activar monitor de audio DTMF ────────────────
         self._log("✅ Llamada contestada — monitor DTMF activo", "success")
-        start_audio_monitor(self.audio_input)
+        start_audio_monitor(audio_in)   # usa el int ya convertido
 
         # Esperar hasta que el usuario cuelgue o la llamada termine
         while not self._hangup_ev.is_set() and not disconn_ev.is_set():
@@ -2724,24 +2734,38 @@ def manual_dial():
     if not device_id:
         return jsonify({"ok": False, "error": "Selecciona un dispositivo ADB antes de marcar"}), 400
 
-    # Dispositivos de audio (opcionales — solo advertencia)
-    audio_input      = data.get("audio_device")
-    audio_output_idx = data.get("audio_output_device")
-    audio_output_name = None
+    # Dispositivos de audio (opcionales)
+    audio_input_raw  = data.get("audio_device")
+    audio_output_raw = data.get("audio_output_device")
 
+    # Convertir a int de forma segura (el JSON puede traer strings o numbers)
+    audio_input: "int | None" = None
+    audio_output_idx: "int | None" = None
+    try:
+        if audio_input_raw  is not None and str(audio_input_raw).strip() != "":
+            audio_input = int(audio_input_raw)
+    except (ValueError, TypeError):
+        pass
+    try:
+        if audio_output_raw is not None and str(audio_output_raw).strip() != "":
+            audio_output_idx = int(audio_output_raw)
+    except (ValueError, TypeError):
+        pass
+
+    audio_output_name: "str | None" = None
     if audio_output_idx is not None and _SD_OK:
         try:
-            audio_output_name = sd.query_devices(int(audio_output_idx))["name"]
+            audio_output_name = sd.query_devices(audio_output_idx)["name"]
         except Exception:
             audio_output_name = None
 
     with _manual_lock:
         _manual_call = ManualCallSession(
-            number           = number,
-            device_id        = device_id,
-            audio_input      = audio_input,
-            audio_output_idx = int(audio_output_idx) if audio_output_idx is not None else None,
-            audio_output_name= audio_output_name,
+            number            = number,
+            device_id         = device_id,
+            audio_input       = audio_input,       # ya es int | None
+            audio_output_idx  = audio_output_idx,  # ya es int | None
+            audio_output_name = audio_output_name,
         )
         _manual_call.start()
 
