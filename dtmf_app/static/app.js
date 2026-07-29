@@ -659,7 +659,7 @@ function _onBridgeState(state) {
     if (e.key === "Enter") E("btn-manual-dial")?.click();
   });
 
-  // Botón LLAMAR
+  // Botón LLAMAR — envía config IVR completa (idéntico a campaña automática)
   E("btn-manual-dial")?.addEventListener("click", async () => {
     const inp    = E("manual-number");
     const number = inp?.value.trim();
@@ -679,16 +679,40 @@ function _onBridgeState(state) {
     const audioIn  = (inVal  !== "" && inVal  != null) ? parseInt(inVal)  : null;
     const audioOut = (outVal !== "" && outVal != null) ? parseInt(outVal) : null;
 
+    // Recopilar opciones IVR del DOM (igual que startCampaign)
+    const ivrOpts = {};
+    E("ivr-options-list")?.querySelectorAll(".opt-row").forEach(r => {
+      const dg  = r.querySelector(".opt-digit")?.value?.trim();
+      const de  = r.querySelector(".opt-desc")?.value?.trim();
+      const rid = r.dataset.rid;
+      if (dg && de) {
+        const byePath = rid && optByePaths[rid] ? optByePaths[rid] : null;
+        ivrOpts[dg] = byePath ? { desc: de, audio_bye: byePath } : de;
+      }
+    });
+
     _manualLog("📞 Marcando " + number + "…", "info");
     _manualSetState("DIALING", number);
+
+    // Payload completo: mismo que campaña automática con delay_seconds=0
+    const payload = {
+      number,
+      device_id:           deviceId,
+      audio_device:        audioIn,
+      audio_output_device: audioOut,
+      audio_welcome:       audioPaths.welcome  || null,
+      audio_menu:          audioPaths.menu     || null,
+      audio_no_tone:       audioPaths.no_tone  || null,
+      ivr_options:         ivrOpts,
+      tone_timeout:        parseInt(E("ivr-tone-timeout")?.value) || 10,
+      menu_repeats:        parseInt(E("ivr-menu-repeats")?.value) || 2,
+      record_calls:        E("ivr-record-calls")?.checked || false,
+    };
 
     try {
       const r = await fetch("/ivr/manual/dial", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          number, device_id: deviceId,
-          audio_device: audioIn, audio_output_device: audioOut,
-        }),
+        body: JSON.stringify(payload),
       });
       const d = await r.json();
       if (!d.ok) {
@@ -700,6 +724,7 @@ function _onBridgeState(state) {
       _manualSetState("ERROR", null);
     }
   });
+
 
   // Botón COLGAR
   E("btn-manual-hangup")?.addEventListener("click", async () => {
