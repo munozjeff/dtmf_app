@@ -2,9 +2,7 @@
 
 // ── Socket IVR ────────────────────────────────────────────────
 const ivrSocket = io("http://localhost:5050", { transports: ["websocket"] });
-ivrSocket.on("connect", () => {
-  addLog("✅ Conectado al servidor IVR", "ok");
-});
+ivrSocket.on("connect",       () => addLog("✅ Conectado al servidor IVR", "ok"));
 ivrSocket.on("disconnect",    () => addLog("⚠️ Desconectado del servidor", "warn"));
 ivrSocket.on("connect_error", e  => addLog("❌ Error conexión: " + e.message, "err"));
 ivrSocket.on("ivr_log",           d => addLog(d.msg, d.level === "success" ? "ok" : d.level === "error" ? "err" : d.level));
@@ -12,6 +10,10 @@ ivrSocket.on("ivr_status",        d => onIvrStatus(d));
 ivrSocket.on("ivr_call_update",   d => onCallUpdate(d));
 ivrSocket.on("ivr_digit",         d => onIvrDigit(d));
 ivrSocket.on("ivr_campaign_done", () => endCampaign());
+ivrSocket.on("manual_state",      d => _manualSetState(d.state, d.number));
+ivrSocket.on("manual_log",        d => _manualLog(d.msg, d.level));
+ivrSocket.on("bridge_state",      d => _onBridgeState(d.state));
+ivrSocket.on("bridge_log",        d => { addLog("🎧 " + d.msg, d.level === "error" ? "err" : d.level); });
 
 // Prueba de entrada: nivel en tiempo real
 ivrSocket.on("input_test_level", ({ level }) => {
@@ -30,144 +32,93 @@ ivrSocket.on("input_test_done", ({ peak }) => {
   const btn  = document.getElementById("btn-test-input");
   if (bar) bar.style.width = "0%";
   if (txt) txt.textContent = peak > 0.001 ? "✅ Señal OK (pico: " + peak.toFixed(4) + ")" : "⚠️ Silencio detectado";
-  if (btn) { btn.disabled = false; btn.textContent = "🎤 Probar"; }
+  if (btn) { btn.disabled = false; btn.textContent = "🎤 Test"; }
   setTimeout(() => { if (wrap) wrap.style.display = "none"; }, 4000);
 });
 
 // ── Visualizador de audio en tiempo real ─────────────────────
 const _VIZ = (() => {
-  const COLS     = 180;       // número de barras visibles
-  const COLOR_IN  = "#22d3ee";  // cyan — entrada (mic)
-  const COLOR_OUT = "#a78bfa";  // púrpura — salida (IVR)
+  const COLS     = 180;
+  const COLOR_IN  = "#22d3ee";
+  const COLOR_OUT = "#a78bfa";
   const GLOW_IN   = "rgba(34,211,238,0.35)";
   const GLOW_OUT  = "rgba(167,139,250,0.35)";
-
   const state = {
     in:  { buf: new Float32Array(COLS), db: -Infinity },
     out: { buf: new Float32Array(COLS), db: -Infinity },
   };
-
   function _getCtx(id) {
-    const c = document.getElementById(id);
-    if (!c) return null;
-    // Ajustar resolución al tamaño real
+    const c = document.getElementById(id); if (!c) return null;
     const rect = c.getBoundingClientRect();
     if (c.width !== Math.floor(rect.width) || c.height !== Math.floor(rect.height)) {
-      c.width  = Math.floor(rect.width)  || 400;
-      c.height = Math.floor(rect.height) || 42;
+      c.width = Math.floor(rect.width) || 400; c.height = Math.floor(rect.height) || 40;
     }
     return { ctx: c.getContext("2d"), w: c.width, h: c.height };
   }
-
   function _draw(canvasId, buf, color, glow, dbEl, dbVal) {
-    const r = _getCtx(canvasId);
-    if (!r) return;
+    const r = _getCtx(canvasId); if (!r) return;
     const { ctx, w, h } = r;
     const barW = Math.max(1, w / COLS);
-
     ctx.clearRect(0, 0, w, h);
-
-    // Fondo sutil
-    ctx.fillStyle = "rgba(0,0,0,0.2)";
-    ctx.fillRect(0, 0, w, h);
-
-    // Línea de referencia central
-    ctx.strokeStyle = "rgba(255,255,255,0.05)";
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(0, h / 2);
-    ctx.lineTo(w, h / 2);
-    ctx.stroke();
-
-    // Barras del waveform
-    ctx.shadowColor  = glow;
-    ctx.shadowBlur   = 6;
-    ctx.fillStyle    = color;
-
+    ctx.fillStyle = "rgba(0,0,0,0.2)"; ctx.fillRect(0, 0, w, h);
+    ctx.strokeStyle = "rgba(255,255,255,0.05)"; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(0, h/2); ctx.lineTo(w, h/2); ctx.stroke();
+    ctx.shadowColor = glow; ctx.shadowBlur = 6; ctx.fillStyle = color;
     for (let i = 0; i < COLS; i++) {
-      const amp   = buf[i];                               // ya es 0–1 (dBFS norm)
-      const barH  = Math.max(1, amp * (h * 0.92));
-      const x     = i * barW;
-      const y     = (h - barH) / 2;
-      ctx.fillRect(x, y, Math.max(1, barW - 1), barH);
+      const amp = buf[i]; const barH = Math.max(1, amp * (h * 0.92));
+      ctx.fillRect(i * barW, (h - barH) / 2, Math.max(1, barW - 1), barH);
     }
-
     ctx.shadowBlur = 0;
-
-    // Indicador dB
     if (dbEl) {
       const db = dbVal > -80 ? dbVal.toFixed(1) + " dB" : "—";
       dbEl.textContent = db;
-      dbEl.style.color = dbVal > -20 ? "#f87171"
-                       : dbVal > -40 ? "#fbbf24"
-                       : dbVal > -60 ? color
-                       :               "#334155";
+      dbEl.style.color = dbVal > -20 ? "#f87171" : dbVal > -40 ? "#fbbf24" : dbVal > -60 ? color : "#334155";
     }
   }
-
-  // Normalizar RMS → escala dBFS → 0..1 para la barra
-  // -60 dB = piso de silencio (0), 0 dB = máximo (1)
-  // Voz típica RMS ≈ 0.01..0.05 → -40..-26 dB → 33..57% de altura
   function _rmsToNorm(rms) {
     if (rms < 1e-9) return 0;
-    const db  = 20 * Math.log10(rms);
-    const MIN = -60;
-    return Math.max(0, Math.min(1, (db - MIN) / (-MIN)));
+    const db = 20 * Math.log10(rms);
+    return Math.max(0, Math.min(1, (db - (-60)) / 60));
   }
-
   function push(ch, rms) {
     const key = ch === "input" ? "in" : "out";
-    const s   = state[key];
-    s.buf.copyWithin(0, 1);
-    s.buf[COLS - 1] = _rmsToNorm(rms);       // ← escala log dBFS
+    const s = state[key];
+    s.buf.copyWithin(0, 1); s.buf[COLS - 1] = _rmsToNorm(rms);
     s.db = rms > 1e-9 ? 20 * Math.log10(rms) : -120;
   }
-
   let _rafId = null;
   function _loop() {
-    _draw("viz-canvas-in",  state.in.buf,  COLOR_IN,  GLOW_IN,
-          document.getElementById("viz-db-in"),  state.in.db);
-    _draw("viz-canvas-out", state.out.buf, COLOR_OUT, GLOW_OUT,
-          document.getElementById("viz-db-out"), state.out.db);
+    // Canales de la tab Automática
+    _draw("viz-canvas-in",  state.in.buf,  COLOR_IN,  GLOW_IN,  document.getElementById("viz-db-in"),  state.in.db);
+    _draw("viz-canvas-out", state.out.buf, COLOR_OUT, GLOW_OUT, document.getElementById("viz-db-out"), state.out.db);
+    // Canales de la tab Manual (mismos datos)
+    _draw("viz-canvas-in-m",  state.in.buf,  COLOR_IN,  GLOW_IN,  document.getElementById("viz-db-in-m"),  state.in.db);
+    _draw("viz-canvas-out-m", state.out.buf, COLOR_OUT, GLOW_OUT, document.getElementById("viz-db-out-m"), state.out.db);
     _rafId = requestAnimationFrame(_loop);
   }
-
-  return {
-    start() { if (!_rafId) _loop(); },
-    stop()  { if (_rafId) { cancelAnimationFrame(_rafId); _rafId = null; } },
-    push,
-  };
+  return { start() { if (!_rafId) _loop(); }, push };
 })();
 
-ivrSocket.on("audio_viz", ({ ch, rms }) => {
-  _VIZ.push(ch, rms);
-});
+ivrSocket.on("audio_viz", ({ ch, rms }) => { _VIZ.push(ch, rms); });
 
-// ── Auto-inicio del visualizador de audio ─────────────────────
+// ── Viz monitors (audio en tiempo real) ───────────────────────
 function _getSelIdx(id) {
   const el = document.getElementById(id);
   return el && el.value !== "" ? parseInt(el.value, 10) : null;
 }
-
 function startVizMonitors() {
   const inIdx  = _getSelIdx("ivr-audio-device");
   const outIdx = _getSelIdx("ivr-output-device");
   if (inIdx === null && outIdx === null) return;
   fetch("/ivr/viz/start", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
+    method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ input: inIdx, output: outIdx }),
   }).catch(() => {});
 }
-
-// Arrancar render loop y viz al cargar la página
 window.addEventListener("load", () => {
   _VIZ.start();
-  // Pequeño delay para que el servidor esté listo
   setTimeout(startVizMonitors, 800);
 });
-
-// Re-iniciar viz cuando cambian los selectores de dispositivo
 ["ivr-audio-device", "ivr-output-device"].forEach(id => {
   document.addEventListener("DOMContentLoaded", () => {
     const el = document.getElementById(id);
@@ -175,18 +126,87 @@ window.addEventListener("load", () => {
   });
 });
 
-// ── Log ───────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════
+//  LOG
+// ══════════════════════════════════════════════════════════════
+
 function addLog(msg, cls) {
-  const el = document.getElementById("ivr-log"); if (!el) return;
-  const d = document.createElement("div");
-  d.className = "log-line " + (cls || "info");
-  d.textContent = msg;
-  el.appendChild(d);
-  el.scrollTop = el.scrollHeight;
+  ["ivr-log", "ivr-log-m"].forEach(id => {
+    const el = document.getElementById(id); if (!el) return;
+    const d = document.createElement("div");
+    d.className = "log-line " + (cls || "info");
+    d.textContent = msg;
+    el.appendChild(d);
+    el.scrollTop = el.scrollHeight;
+  });
 }
 
-// ── Eventos servidor ──────────────────────────────────────────
-let ivrRunning = false;
+// ══════════════════════════════════════════════════════════════
+//  TABS PRINCIPALES
+// ══════════════════════════════════════════════════════════════
+
+let ivrRunning  = false;
+let _manualActive = false;
+
+function switchMainTab(tab) {
+  if (tab === "manual" && ivrRunning) {
+    addLog("⚠️ Detén la campaña antes de cambiar a Marcación Manual.", "warn");
+    return;
+  }
+  if (tab === "auto" && _manualActive) {
+    addLog("⚠️ Cuelga la llamada manual antes de volver a Campaña Automática.", "warn");
+    return;
+  }
+  ["auto", "manual"].forEach(t => {
+    document.getElementById("tab-" + t)?.classList.toggle("active", t === tab);
+    document.getElementById("tc-" + t)?.classList.toggle("active", t === tab);
+    if (t === "manual") {
+      document.getElementById("tab-" + t)?.classList.toggle("manual", true);
+    }
+  });
+}
+
+// ══════════════════════════════════════════════════════════════
+//  MODO DE LLAMADA (IVR / Bridge / IVR+Bridge)
+// ══════════════════════════════════════════════════════════════
+
+let _callMode = "ivr";
+
+const CALL_MODE_DESCS = {
+  ivr:        "IVR automático: reproduce audios y detecta DTMF",
+  bridge:     "Puente de audio: el agente habla directamente con el destinatario",
+  ivr_bridge: "IVR + Puente: el IVR corre hasta el dígito trigger, luego activa el puente",
+};
+
+function setCallMode(mode) {
+  _callMode = mode;
+
+  // Actualizar botones
+  document.querySelectorAll(".call-mode-btn").forEach(btn => {
+    btn.classList.toggle("active", btn.dataset.mode === mode);
+  });
+
+  // Actualizar descripción
+  const desc = document.getElementById("call-mode-desc");
+  if (desc) desc.textContent = CALL_MODE_DESCS[mode] || "";
+
+  // Mostrar/ocultar secciones de config
+  const secIvr    = document.getElementById("sec-ivr-config");
+  const secBridge = document.getElementById("sec-bridge-config");
+  const trigWrap  = document.getElementById("bridge-trigger-wrap");
+
+  if (secIvr)    secIvr.classList.toggle("visible",    mode === "ivr" || mode === "ivr_bridge");
+  if (secBridge) secBridge.classList.toggle("visible", mode === "bridge" || mode === "ivr_bridge");
+  if (trigWrap)  trigWrap.style.display = mode === "ivr_bridge" ? "flex" : "none";
+}
+
+document.querySelectorAll(".call-mode-btn").forEach(btn => {
+  btn.addEventListener("click", () => setCallMode(btn.dataset.mode));
+});
+
+// ══════════════════════════════════════════════════════════════
+//  EVENTOS DE CAMPAÑA
+// ══════════════════════════════════════════════════════════════
 
 function onIvrStatus({ processed, total, running }) {
   const sp = document.getElementById("ivr-stat-processed");
@@ -209,36 +229,25 @@ function onCallUpdate({ number, status }) {
     const pill = document.getElementById("ivr-pill-" + number);
     if (pill) {
       const cls = {
-        CALLING:                 "p-call",
-        ACTIVE:                  "p-act",
-        ANSWERED_TONE:           "p-ok",
-        ANSWERED_NO_TONE:        "p-warn",
-        NO_ANSWER:               "p-warn",
-        DISCONNECTED:            "p-warn",
-        DISCONNECTED_DURING_CALL:"p-disc",   // 📵 colgó mientras hablaba
-        UNAVAILABLE:             "p-off",    // ⛔ apagado / no disponible
-        ERROR:                   "p-err",
+        CALLING: "p-call", ACTIVE: "p-act", ANSWERED_TONE: "p-ok",
+        ANSWERED_NO_TONE: "p-warn", NO_ANSWER: "p-warn", DISCONNECTED: "p-warn",
+        DISCONNECTED_DURING_CALL: "p-disc", UNAVAILABLE: "p-off", ERROR: "p-err",
+        BRIDGE_ACTIVE: "p-brdg",
       };
       const labels = {
-        DISCONNECTED_DURING_CALL: "📵 Colgó",
-        ANSWERED_TONE:            "✅ Tono",
-        ANSWERED_NO_TONE:         "⚠️ Sin tono",
-        NO_ANSWER:                "📭 No contestó",
-        CALLING:                  "📞 Marcando",
-        ACTIVE:                   "🟢 Activa",
-        DISCONNECTED:             "❌ Desconect.",
-        UNAVAILABLE:              "⛔ No disponible",
-        ERROR:                    "❌ Error",
+        CALLING: "📞 Marcando", ACTIVE: "🟢 Activa", ANSWERED_TONE: "✅ Tono",
+        ANSWERED_NO_TONE: "⚠️ Sin tono", NO_ANSWER: "📭 No contestó",
+        DISCONNECTED: "❌ Desconect.", DISCONNECTED_DURING_CALL: "📵 Colgó",
+        UNAVAILABLE: "⛔ No disponible", ERROR: "❌ Error",
+        BRIDGE_ACTIVE: "🎧 Puente",
       };
       pill.className = "pill " + (cls[status] || "p-pend");
       pill.textContent = labels[status] || status;
     }
-    // Log especial según estado
-    if (status === "DISCONNECTED_DURING_CALL") {
-      addLog("📵 " + number + " — colgó durante la llamada (audio detenido)", "warn");
-    } else if (status === "UNAVAILABLE") {
-      addLog("⛔ " + number + " — apagado o no disponible (colgar automático)", "warn");
-    }
+    if (status === "DISCONNECTED_DURING_CALL")
+      addLog("📵 " + number + " — colgó durante la llamada", "warn");
+    else if (status === "UNAVAILABLE")
+      addLog("⛔ " + number + " — apagado o no disponible", "warn");
   }
 }
 
@@ -252,88 +261,121 @@ function endCampaign() {
   ivrRunning = false;
   const lb = document.getElementById("ivr-launch-btn"); if (lb) lb.disabled = false;
   const sb = document.getElementById("ivr-stop-btn");   if (sb) sb.disabled = true;
+  const pb = document.getElementById("ivr-pause-btn");  if (pb) pb.disabled = true;
   const cs = document.getElementById("ivr-campaign-status"); if (cs) cs.textContent = "Finalizada";
   const dl = document.getElementById("ivr-download-btn");    if (dl) dl.style.display = "inline-flex";
   addLog("✅ Campaña finalizada", "ok");
 }
 
-// ── Init ──────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════
+//  ESTADO MANUAL
+// ══════════════════════════════════════════════════════════════
+
+const MS_LABELS = { IDLE: "Inactivo", DIALING: "Marcando…", ACTIVE: "En llamada", ENDED: "Finalizada", ERROR: "Error" };
+
+function _manualSetState(state, number) {
+  const dot = document.getElementById("manual-dot");
+  const lbl = document.getElementById("manual-state-lbl");
+  const num = document.getElementById("manual-state-num");
+  const bd  = document.getElementById("btn-manual-dial");
+  const bh  = document.getElementById("btn-manual-hangup");
+  if (dot) dot.className = "msdot " + state.toLowerCase();
+  if (lbl) lbl.textContent = MS_LABELS[state] || state;
+  const showNum = number && state !== "IDLE" && state !== "ENDED" && state !== "ERROR";
+  if (num) { num.hidden = !showNum; if (showNum) num.textContent = number; }
+  const calling = state === "DIALING" || state === "ACTIVE";
+  _manualActive = calling;
+  if (bd) bd.disabled = calling;
+  if (bh) bh.disabled = !calling;
+  const lb = document.getElementById("ivr-launch-btn");
+  if (lb && !ivrRunning) lb.disabled = calling;
+}
+
+function _manualLog(msg, level) {
+  const el = document.getElementById("manual-log"); if (!el) return;
+  const d = document.createElement("div");
+  d.className = "ml-line " + (level === "success" ? "success" : level === "error" ? "error" : level || "info");
+  const ts = new Date().toLocaleTimeString("es-CO", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  d.textContent = "[" + ts + "] " + msg;
+  el.appendChild(d); el.scrollTop = el.scrollHeight;
+  // Espejo en log principal
+  addLog("📞 [Manual] " + msg, level === "success" ? "ok" : level === "error" ? "err" : level);
+}
+
+// ══════════════════════════════════════════════════════════════
+//  BRIDGE STATE
+// ══════════════════════════════════════════════════════════════
+
+function _onBridgeState(state) {
+  addLog("🎧 Puente: " + state, state === "ACTIVE" ? "ok" : "info");
+}
+
+// ══════════════════════════════════════════════════════════════
+//  INIT
+// ══════════════════════════════════════════════════════════════
+
 (function init() {
   const E = id => document.getElementById(id);
 
-  // Utilidad: ejecuta fn solo una vez cada `ms` milisegundos
   function debounce(fn, ms) {
-    let t; return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+    let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
   }
 
-  // ── Dispositivos de audio (Python los enumera) ──
+  // ── Dispositivos de audio ─────────────────────────────────────
   let _audioLoaded = false;
   async function _loadAudioDevices() {
     try {
       const r = await fetch("/ivr/audio_devices");
       const d = await r.json();
 
-      // Entradas (micrófono)
-      const selIn = E("ivr-audio-device");
-      if (selIn) {
-        const prevIn = selIn.value;
-        selIn.innerHTML = '<option value="">🖥️ Predeterminado del sistema</option>';
-        (d.inputs || []).forEach(dev => {
+      const fillSel = (selId, list, showDefault, defaultTxt) => {
+        const sel = E(selId); if (!sel) return;
+        const prev = sel.value;
+        sel.innerHTML = '<option value="">' + defaultTxt + '</option>';
+        (list || []).forEach(dev => {
           const o = document.createElement("option");
           o.value = dev.index;
           o.textContent = (dev.is_default ? "⭐ " : "") + dev.name + " (" + dev.samplerate + " Hz)";
-          selIn.appendChild(o);
+          sel.appendChild(o);
         });
-        if (prevIn) selIn.value = prevIn;
-      }
+        if (prev) sel.value = prev;
+      };
 
-      // Salidas (altavoz / auriculares)
-      const selOut = E("ivr-output-device");
-      if (selOut) {
-        const prevOut = selOut.value;
-        selOut.innerHTML = '<option value="">🔊 Predeterminado del sistema</option>';
-        (d.outputs || []).forEach(dev => {
-          const o = document.createElement("option");
-          o.value = dev.index;
-          o.textContent = (dev.is_default ? "⭐ " : "") + dev.name + " (" + dev.samplerate + " Hz)";
-          selOut.appendChild(o);
-        });
-        if (prevOut) selOut.value = prevOut;
-      }
+      fillSel("ivr-audio-device",   d.inputs,  true, "🖥️ Predeterminado");
+      fillSel("ivr-output-device",  d.outputs, true, "🔊 Predeterminado");
+      fillSel("bridge-phone-in",    d.inputs,  false, "🎤 Sin seleccionar");
+      fillSel("bridge-phone-out",   d.outputs, false, "🔊 Sin seleccionar");
+      fillSel("bridge-pc-mic",      d.inputs,  true,  "🖥️ Predeterminado");
+      fillSel("bridge-pc-spk",      d.outputs, true,  "🔊 Predeterminado");
 
       if (d.ok) {
-        const ni = (d.inputs || []).length, no = (d.outputs || []).length;
-        addLog("🎤 " + ni + " entrada(s) · 🔊 " + no + " salida(s) de audio detectadas", "ok");
+        addLog("🎤 " + (d.inputs||[]).length + " entrada(s) · 🔊 " + (d.outputs||[]).length + " salida(s)", "ok");
       } else {
-        addLog("⚠️ " + (d.error || "Error cargando dispositivos de audio"), "warn");
+        addLog("⚠️ " + (d.error || "Error cargando dispositivos"), "warn");
       }
     } catch(e) { addLog("❌ Error dispositivos audio: " + e.message, "err"); }
   }
-  // Versión con debounce — evita llamadas repetidas en reconexión del socket
   const loadAudioDevices = debounce(_loadAudioDevices, 500);
-
-  E("ivr-refresh-audio")?.addEventListener("click", _loadAudioDevices); // el botón siempre fuerza
+  E("ivr-refresh-audio")?.addEventListener("click", _loadAudioDevices);
   loadAudioDevices();
 
-  // Cambio de dispositivo de entrada: detener monitor si estaba activo
   E("ivr-audio-device")?.addEventListener("change", () => {
     fetch("/ivr/monitor/stop", { method: "POST" });
   });
 
-  // ── Prueba de ENTRADA (micrófono) ──
+  // ── Test entrada ──────────────────────────────────────────────
   E("btn-test-input")?.addEventListener("click", async () => {
-    const btn  = E("btn-test-input");
+    const btn = E("btn-test-input");
     const wrap = E("input-level-wrap");
     const bar  = E("input-level-bar");
     const txt  = E("input-level-txt");
     const devIdx = E("ivr-audio-device")?.value;
     const deviceIndex = (devIdx !== "" && devIdx != null) ? parseInt(devIdx) : null;
-
-    if (btn)  { btn.disabled = true; btn.textContent = "⏳ Capturando 3s..."; }
+    if (btn)  { btn.disabled = true; btn.textContent = "⏳ 3s…"; }
     if (wrap) wrap.style.display = "block";
     if (bar)  bar.style.width = "0%";
-    if (txt)  txt.textContent = "🎤 Habla cerca del micrófono...";
-    addLog("🎤 Iniciando prueba de entrada de audio (3 segundos)...", "info");
+    if (txt)  txt.textContent = "🎤 Habla cerca del micrófono…";
+    addLog("🎤 Prueba de entrada (3 segundos)…", "info");
     try {
       await fetch("/ivr/test_input", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -341,32 +383,27 @@ function endCampaign() {
       });
     } catch(e) {
       addLog("❌ Error: " + e.message, "err");
-      if (btn) { btn.disabled = false; btn.textContent = "🎤 Probar"; }
+      if (btn) { btn.disabled = false; btn.textContent = "🎤 Test"; }
     }
   });
 
-  // ── Prueba de SALIDA (altavoz / auriculares) ──
+  // ── Test salida ───────────────────────────────────────────────
   E("btn-test-output")?.addEventListener("click", async () => {
     const btn = E("btn-test-output");
     const devIdx = E("ivr-output-device")?.value;
     const deviceIndex = (devIdx !== "" && devIdx != null) ? parseInt(devIdx) : null;
-
-    if (btn) { btn.disabled = true; btn.textContent = "🔊 Reproduciendo..."; }
-    addLog("🔊 Reproduciendo pitido de prueba 1kHz (1 segundo)...", "info");
+    if (btn) { btn.disabled = true; btn.textContent = "🔊 Reproduciendo…"; }
+    addLog("🔊 Reproduciendo pitido de prueba…", "info");
     try {
       await fetch("/ivr/test_output", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ device_index: deviceIndex })
       });
     } catch(e) { addLog("❌ Error: " + e.message, "err"); }
-    finally {
-      setTimeout(() => {
-        if (btn) { btn.disabled = false; btn.textContent = "🔊 Probar"; }
-      }, 1600);
-    }
+    finally { setTimeout(() => { if (btn) { btn.disabled = false; btn.textContent = "🔊 Test"; } }, 1600); }
   });
 
-  // ── Dispositivos ADB ──
+  // ── Dispositivos ADB ──────────────────────────────────────────
   async function _loadADB() {
     try {
       const r = await fetch("/ivr/devices"); const d = await r.json();
@@ -376,75 +413,44 @@ function endCampaign() {
         const o = document.createElement("option"); o.value = dev; o.textContent = dev; sel.appendChild(o);
       });
       if (d.devices?.length) addLog("📱 " + d.devices.length + " dispositivo(s) ADB", "ok");
-      else addLog("⚠️ Sin dispositivos ADB conectados", "warn");
+      else addLog("⚠️ Sin dispositivos ADB", "warn");
     } catch(e) { addLog("❌ Error ADB: " + e.message, "err"); }
   }
-  const loadADB = debounce(_loadADB, 500);
   E("ivr-refresh-devices")?.addEventListener("click", _loadADB);
-  loadADB();
+  _loadADB();
 
-  // ── Monitor ADB en tiempo real ────────────────────────────────
+  // ADB status dot
   function _adbUpdateDot(connected, deviceId) {
-    const dot = E("adb-status-dot");
-    const txt = E("adb-status-txt");
+    const dot = E("adb-status-dot"); const txt = E("adb-status-txt");
     if (!dot || !txt) return;
-
-    if (!deviceId) {
-      dot.className = "dot";
-      txt.textContent = "Sin dispositivo seleccionado";
-      txt.style.color = "#64748b";
-      return;
-    }
-    if (connected) {
-      dot.className = "dot on";
-      txt.textContent = "Conectado: " + deviceId;
-      txt.style.color = "#4ade80";
-    } else {
-      dot.className = "dot err";
-      txt.textContent = "⚠ DESCONECTADO — reconectando…";
-      txt.style.color = "#f87171";
-    }
+    if (!deviceId) { dot.className = "dot"; txt.textContent = "Sin dispositivo"; return; }
+    dot.className = connected ? "dot on" : "dot err";
+    txt.textContent = connected ? "Conectado: " + deviceId : "⚠ DESCONECTADO…";
   }
-
-  // Escuchar eventos del watchdog (server → UI via socket)
   ivrSocket.on("adb_status", ({ connected, device_id }) => {
     _adbUpdateDot(connected, device_id);
-    if (!connected && ivrRunning) {
-      addLog("⚠️ ADB desconectado — campaña pausada hasta reconexión", "warn");
-    } else if (connected && ivrRunning) {
-      addLog("✅ ADB reconectado — campaña reanudada", "ok");
-    }
+    if (!connected && ivrRunning) addLog("⚠️ ADB desconectado — campaña pausada", "warn");
+    else if (connected && ivrRunning) addLog("✅ ADB reconectado", "ok");
   });
-
-  // Polling propio: verifica conexión cada 5s cuando hay dispositivo seleccionado
-  // (cubre el caso en que no hay campaña activa y el watchdog no está corriendo)
   async function _pollADBStatus() {
     const sel = E("ivr-device");
     const deviceId = sel?.value?.trim();
-    if (!deviceId || ivrRunning) return;   // si hay campaña el watchdog ya lo hace
+    if (!deviceId || ivrRunning) return;
     try {
       const r = await fetch("/ivr/adb/status?device_id=" + encodeURIComponent(deviceId));
       const d = await r.json();
       _adbUpdateDot(d.connected, deviceId);
-    } catch (e) { /* ignorar */ }
+    } catch (e) {}
   }
   setInterval(_pollADBStatus, 5000);
-
-  // Actualizar dot cuando el usuario cambia el dispositivo
   E("ivr-device")?.addEventListener("change", () => {
     const v = E("ivr-device")?.value;
-    if (!v) {
-      _adbUpdateDot(false, null);
-    } else {
-      // Verificación inmediata al seleccionar
-      fetch("/ivr/adb/status?device_id=" + encodeURIComponent(v))
-        .then(r => r.json())
-        .then(d => _adbUpdateDot(d.connected, v))
-        .catch(() => {});
-    }
+    if (!v) { _adbUpdateDot(false, null); return; }
+    fetch("/ivr/adb/status?device_id=" + encodeURIComponent(v))
+      .then(r => r.json()).then(d => _adbUpdateDot(d.connected, v)).catch(() => {});
   });
 
-  // ── Excel ──
+  // ── Excel ─────────────────────────────────────────────────────
   let ivrNumbers = [];
   E("ivr-excel-input")?.addEventListener("change", e => {
     const f = e.target.files[0]; if (!f) return;
@@ -467,10 +473,10 @@ function endCampaign() {
     reader.readAsArrayBuffer(f);
   });
 
-  // ── Audios ──
+  // ── Audios IVR ────────────────────────────────────────────────
   const audioPaths = { welcome: null, menu: null, no_tone: null };
   async function uploadAudio(file, type) {
-    addLog("⏳ Subiendo audio " + type + "...", "info");
+    addLog("⏳ Subiendo audio " + type + "…", "info");
     const fd = new FormData(); fd.append("file", file); fd.append("type", type);
     try {
       const r = await fetch("/ivr/upload_audio", { method: "POST", body: fd });
@@ -479,70 +485,56 @@ function endCampaign() {
       else addLog("❌ " + (d.error || "Error subiendo audio"), "err");
     } catch(e) { addLog("❌ Red: " + e.message, "err"); }
   }
-  // Bienvenida
   E("ivr-audio-welcome-input")?.addEventListener("change", e => {
     const f = e.target.files[0]; if (!f) return;
-    const nm = E("ivr-audio-welcome-name"); if (nm) nm.textContent = f.name;
-    uploadAudio(f, "welcome");
+    E("ivr-audio-welcome-name").textContent = f.name; uploadAudio(f, "welcome");
   });
-  // Menú IVR
   E("ivr-audio-menu-input")?.addEventListener("change", e => {
     const f = e.target.files[0]; if (!f) return;
-    const nm = E("ivr-audio-menu-name"); if (nm) nm.textContent = f.name;
-    uploadAudio(f, "menu");
+    E("ivr-audio-menu-name").textContent = f.name; uploadAudio(f, "menu");
   });
-  // Sin tono (opcional)
   E("ivr-audio-notone-input")?.addEventListener("change", e => {
     const f = e.target.files[0]; if (!f) return;
-    const nm = E("ivr-audio-notone-name"); if (nm) nm.textContent = f.name;
-    uploadAudio(f, "no_tone");
+    E("ivr-audio-notone-name").textContent = f.name; uploadAudio(f, "no_tone");
   });
 
-  // ── Opciones IVR (con audio de despedida por opcion) ──
-  const optByePaths = {};   // { rowId: serverPath }
+  // ── Opciones IVR ──────────────────────────────────────────────
+  const optByePaths = {};
   let optCounter = 0;
-
   E("ivr-add-option")?.addEventListener("click", () => {
     const list = E("ivr-options-list"); if (!list) return;
-    const rid  = "opt-" + (++optCounter);
-    const row  = document.createElement("div");
+    const rid = "opt-" + (++optCounter);
+    const row = document.createElement("div");
     row.className = "opt-row"; row.dataset.rid = rid;
     row.innerHTML = `
       <div class="opt-row-top">
-        <input type="text" class="finp opt-digit" placeholder="1" maxlength="1"
-               style="width:30px;text-align:center;flex-shrink:0">
-        <input type="text" class="finp opt-desc" placeholder="Descripcion" style="flex:1">
-        <button class="xbtn xr" style="padding:2px 8px">✕</button>
+        <input type="text" class="finp opt-digit" placeholder="1" maxlength="1" style="width:28px;text-align:center;flex-shrink:0;padding:4px">
+        <input type="text" class="finp opt-desc" placeholder="Descripción" style="flex:1;padding:4px">
+        <button class="xbtn xr" style="padding:2px 7px">✕</button>
       </div>
       <div class="opt-row-bye">
         <label>🎵 Despedida:</label>
-        <label class="xbtn xg" for="bye-${rid}" style="padding:2px 7px;font-size:10px">Elegir audio</label>
+        <label class="xbtn xg" for="bye-${rid}" style="padding:2px 6px;font-size:10px">Audio</label>
         <input type="file" id="bye-${rid}" class="opt-bye-input" accept="audio/*,video/*" hidden>
-        <span class="fname opt-bye-name" style="max-width:160px">Global (predeterminada)</span>
+        <span class="fname opt-bye-name">Global (predeterminada)</span>
       </div>`;
-    row.querySelector("button").addEventListener("click", () => {
-      delete optByePaths[rid]; row.remove();
-    });
-    const fileInput = row.querySelector(".opt-bye-input");
-    fileInput.addEventListener("change", async e => {
+    row.querySelector("button").addEventListener("click", () => { delete optByePaths[rid]; row.remove(); });
+    const fi = row.querySelector(".opt-bye-input");
+    fi.addEventListener("change", async e => {
       const f = e.target.files[0]; if (!f) return;
-      const nm = row.querySelector(".opt-bye-name");
-      if (nm) nm.textContent = "⏳ " + f.name;
+      const nm = row.querySelector(".opt-bye-name"); if (nm) nm.textContent = "⏳ " + f.name;
       const fd = new FormData(); fd.append("file", f); fd.append("type", "bye_" + rid);
       try {
         const r = await fetch("/ivr/upload_audio", { method: "POST", body: fd });
         const d = await r.json();
-        if (d.ok) {
-          optByePaths[rid] = d.path;
-          if (nm) nm.textContent = "✅ " + f.name;
-          addLog("✅ Audio despedida cargado para opción " + (row.querySelector(".opt-digit")?.value || "?"), "ok");
-        } else { if (nm) nm.textContent = "❌ Error"; }
-      } catch(ex) { if (row.querySelector(".opt-bye-name")) row.querySelector(".opt-bye-name").textContent = "❌ Red"; }
+        if (d.ok) { optByePaths[rid] = d.path; if (nm) nm.textContent = "✅ " + f.name; }
+        else if (nm) nm.textContent = "❌ Error";
+      } catch { if (row.querySelector(".opt-bye-name")) row.querySelector(".opt-bye-name").textContent = "❌ Red"; }
     });
     list.appendChild(row);
   });
 
-  // ── Cola ──
+  // ── Cola de llamadas ──────────────────────────────────────────
   function buildQueue(numbers) {
     const tb = E("ivr-queue-tbody"); if (!tb) return;
     tb.innerHTML = "";
@@ -555,17 +547,28 @@ function endCampaign() {
     });
   }
 
-  // ── Lanzar campaña ──
+  // ── Lanzar campaña ────────────────────────────────────────────
   async function startCampaign(numbers, isTest) {
     const devSel = E("ivr-device");
     if (!devSel?.value) return addLog("⚠️ Selecciona un dispositivo ADB", "warn");
-    if (!numbers.length) return addLog("⚠️ Sin números en la lista", "warn");
+    if (!numbers.length)  return addLog("⚠️ Sin números en la lista", "warn");
 
-    // Dispositivos de audio
+    // Guard: llamada manual activa
+    if (_manualActive) return addLog("⚠️ Hay una llamada manual activa. Cuélgala primero.", "warn");
+
     const inVal  = E("ivr-audio-device")?.value;
     const outVal = E("ivr-output-device")?.value;
     const audioInIndex  = (inVal  !== "" && inVal  != null) ? parseInt(inVal)  : null;
     const audioOutIndex = (outVal !== "" && outVal != null) ? parseInt(outVal) : null;
+
+    // Configuración del puente
+    const bridgeConfig = {
+      phone_in_idx:   _getSelIdx("bridge-phone-in")  ,
+      phone_out_idx:  _getSelIdx("bridge-phone-out") ,
+      pc_mic_idx:     _getSelIdx("bridge-pc-mic")    ,
+      pc_speaker_idx: _getSelIdx("bridge-pc-spk")    ,
+      trigger_digit:  E("bridge-trigger-digit")?.value || "0",
+    };
 
     const config = {
       numbers,
@@ -579,8 +582,10 @@ function endCampaign() {
       audio_menu:     audioPaths.menu,
       audio_no_tone:  audioPaths.no_tone,
       record_calls:   E("ivr-record-calls")?.checked || false,
+      call_mode:      _callMode,
+      bridge_config:  bridgeConfig,
       ivr_options:    {},
-      is_test:        isTest
+      is_test:        isTest,
     };
     E("ivr-options-list")?.querySelectorAll(".opt-row").forEach(r => {
       const d  = r.querySelector(".opt-digit")?.value?.trim();
@@ -588,17 +593,15 @@ function endCampaign() {
       const rid = r.dataset.rid;
       if (d && de) {
         const byePath = rid && optByePaths[rid] ? optByePaths[rid] : null;
-        // Si tiene audio propio → objeto {desc, audio_bye}; si no → solo string
         config.ivr_options[d] = byePath ? { desc: de, audio_bye: byePath } : de;
       }
     });
 
     ivrRunning = true;
-    const sb = E("ivr-stop-btn");  if (sb) sb.disabled = false;
-    const lb = E("ivr-launch-btn"); if (lb) lb.disabled = true;
-    addLog("🚀 Iniciando campaña con " + numbers.length + " número(s)...", "ok");
-    if (audioInIndex  !== null) addLog("🎤 Entrada: índice " + audioInIndex, "info");
-    if (audioOutIndex !== null) addLog("🔊 Salida:  índice " + audioOutIndex, "info");
+    E("ivr-stop-btn").disabled  = false;
+    E("ivr-pause-btn").disabled = false;
+    E("ivr-launch-btn").disabled = true;
+    addLog("🚀 Iniciando campaña (" + _callMode + ") con " + numbers.length + " número(s)…", "ok");
 
     try {
       const r = await fetch("/ivr/start", {
@@ -611,7 +614,7 @@ function endCampaign() {
     } catch(e) { addLog("❌ Red: " + e.message, "err"); endCampaign(); }
   }
 
-  // ── Botones ──
+  // ── Botones campaña ───────────────────────────────────────────
   E("ivr-test-btn")?.addEventListener("click", () => { E("ivr-test-modal").hidden = false; });
   E("ivr-test-cancel")?.addEventListener("click", () => { E("ivr-test-modal").hidden = true; });
   E("ivr-test-confirm")?.addEventListener("click", () => {
@@ -621,275 +624,22 @@ function endCampaign() {
   });
   E("ivr-launch-btn")?.addEventListener("click", () => startCampaign(ivrNumbers, false));
   E("ivr-stop-btn")?.addEventListener("click", () => {
-    addLog("⏹ Deteniendo campaña...", "warn");
+    addLog("⏹ Deteniendo campaña…", "warn");
     fetch("/ivr/stop", { method: "POST" });
     fetch("/ivr/monitor/stop", { method: "POST" });
   });
-  E("ivr-clear-log")?.addEventListener("click", () => {
-    const log = E("ivr-log"); if (log) log.innerHTML = "";
+  E("ivr-pause-btn")?.addEventListener("click", () => {
+    addLog("⏸ Pausar campaña (función próximamente)…", "info");
   });
+  E("ivr-clear-log")?.addEventListener("click",   () => { const l = E("ivr-log");   if (l) l.innerHTML = ""; });
+  E("ivr-clear-log-m")?.addEventListener("click", () => { const l = E("ivr-log-m"); if (l) l.innerHTML = ""; });
 
   // ══════════════════════════════════════════════════════════════
-  //  NOTIFICACIONES WHATSAPP
+  //  MARCACIÓN MANUAL
   // ══════════════════════════════════════════════════════════════
 
-  // Indicador de estado del navegador WA
-  const WA_DOTS = {
-    closed:      [],
-    opening:     ["wa-open"],
-    ready:       ["wa-ready"],
-    error:       ["wa-err"],
-    unavailable: ["wa-err"],
-  };
-  const WA_LABELS = {
-    closed:      "Navegador cerrado",
-    opening:     "Abriendo… escanea el QR",
-    ready:       "WhatsApp listo ✓",
-    error:       "Error — vuelve a abrir",
-    unavailable: "selenium no instalado",
-  };
-
-  function _waUpdateDot(status, message, queueSize) {
-    const dot = E("wa-status-dot");
-    const txt = E("wa-status-txt");
-    const badge = E("wa-queue-badge");
-
-    if (dot) {
-      dot.className = "dot " + (WA_DOTS[status] || []).join(" ");
-    }
-    if (txt) {
-      txt.textContent = message || WA_LABELS[status] || status;
-    }
-    if (badge) {
-      if (queueSize > 0) {
-        badge.hidden = false;
-        badge.textContent = queueSize + " en cola";
-      } else {
-        badge.hidden = true;
-      }
-    }
-  }
-
-  // Cargar config inicial del servidor
-  async function _waLoadConfig() {
-    try {
-      const r = await fetch("/ivr/wa/config");
-      const d = await r.json();
-      if (!d.ok) return;
-
-      const cfg = d.config || {};
-      const chk = E("wa-enabled");
-      if (chk) chk.checked = !!cfg.enabled;
-
-      const ct = E("wa-contact");
-      if (ct) ct.value = cfg.contact || "";
-
-      const bk = E("wa-backup");
-      if (bk) bk.value = cfg.backup || "";
-
-      const br = d.browser || {};
-      _waUpdateDot(br.status || "closed", br.message, br.queue_size || 0);
-
-      if (!d.available) {
-        _waUpdateDot("unavailable", "⚠ Instala: pip install selenium webdriver-manager", 0);
-      }
-    } catch (e) { /* ignorar */ }
-  }
-
-  // Guardar config en servidor
-  async function _waSaveConfig() {
-    try {
-      await fetch("/ivr/wa/config", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          enabled: E("wa-enabled")?.checked || false,
-          contact: E("wa-contact")?.value?.trim() || "",
-          backup:  E("wa-backup")?.value?.trim() || "",
-        })
-      });
-    } catch (e) { /* ignorar */ }
-  }
-
-  // Toggle y campos → guardar
-  E("wa-enabled")?.addEventListener("change", _waSaveConfig);
-  E("wa-contact")?.addEventListener("input",  debounce(_waSaveConfig, 800));
-  E("wa-backup")?.addEventListener("input",   debounce(_waSaveConfig, 800));
-
-  // Botón: Abrir Chrome con perfil persistente
-  E("wa-open-browser")?.addEventListener("click", async () => {
-    const btn = E("wa-open-browser");
-    if (btn) { btn.disabled = true; btn.textContent = "⏳ Abriendo…"; }
-    _waUpdateDot("opening", "Iniciando Chrome…", 0);
-    addLog("🌐 Abriendo Chrome para WhatsApp…", "info");
-    try {
-      const r = await fetch("/ivr/wa/open_browser", { method: "POST" });
-      const d = await r.json();
-      if (d.ok) {
-        addLog("✅ " + d.msg, "ok");
-        _waUpdateDot("opening", "Escanea el QR si es necesario…", 0);
-      } else {
-        addLog("❌ " + (d.error || d.msg || "Error"), "err");
-        _waUpdateDot("error", d.error || "Error al abrir", 0);
-      }
-    } catch (e) {
-      addLog("❌ Error de red: " + e.message, "err");
-      _waUpdateDot("error", "Error de red", 0);
-    } finally {
-      if (btn) { btn.disabled = false; btn.innerHTML = "&#x1F310; Abrir WhatsApp"; }
-    }
-  });
-
-  // Botón: Cerrar Chrome
-  E("wa-close-browser")?.addEventListener("click", async () => {
-    try {
-      const r = await fetch("/ivr/wa/close_browser", { method: "POST" });
-      const d = await r.json();
-      if (d.ok) {
-        addLog("🔴 Navegador WhatsApp cerrado", "warn");
-        _waUpdateDot("closed", "Navegador cerrado", 0);
-      }
-    } catch (e) { /* ignorar */ }
-  });
-
-  // Polling de estado del navegador WA (cada 4 segundos)
-  async function _waPollStatus() {
-    try {
-      const r = await fetch("/ivr/wa/status");
-      const d = await r.json();
-      _waUpdateDot(d.status || "closed", d.message, d.queue_size || 0);
-    } catch (e) { /* ignorar */ }
-  }
-  setInterval(_waPollStatus, 4000);
-
-  // Cargar config al arrancar
-  _waLoadConfig();
-
-})();
-
-
-// ══════════════════════════════════════════════════════════════
-//  MODO SELECTOR  —  Campaña Automática  ↔  Marcación Manual
-// ══════════════════════════════════════════════════════════════
-
-/**
- * Alterna entre panel de campaña y panel de marcación manual.
- * Bloqueos:
- *   - No puedes cambiar a "campaign" si hay llamada manual activa.
- *   - No puedes cambiar a "manual"  si hay campaña en curso.
- */
-function switchMode(mode) {
-  const tabCamp  = document.getElementById("tab-campaign");
-  const tabMan   = document.getElementById("tab-manual");
-  const hdrCamp  = document.getElementById("panel-campaign-hdr");
-  const scroll   = document.querySelector(".ivr-scroll");
-  const footer   = document.querySelector(".ivr-footer");
-  const panelMan = document.getElementById("panel-manual");
-
-  if (mode === "manual") {
-    if (ivrRunning) {
-      addLog("⚠️ Detén la campaña antes de usar marcación manual.", "warn");
-      return;
-    }
-    tabCamp.classList.remove("active");
-    tabMan.classList.add("active");
-    if (hdrCamp) hdrCamp.style.display = "none";
-    if (scroll)  scroll.style.display  = "none";
-    if (footer)  footer.style.display  = "none";
-    if (panelMan) panelMan.classList.add("visible");
-
-  } else {
-    if (_manualActive) {
-      addLog("⚠️ Cuelga la llamada manual antes de volver a campaña.", "warn");
-      return;
-    }
-    tabMan.classList.remove("active");
-    tabCamp.classList.add("active");
-    if (hdrCamp) hdrCamp.style.display = "";
-    if (scroll)  scroll.style.display  = "";
-    if (footer)  footer.style.display  = "";
-    if (panelMan) panelMan.classList.remove("visible");
-  }
-}
-
-// ══════════════════════════════════════════════════════════════
-//  MARCACIÓN MANUAL — lógica JS
-// ══════════════════════════════════════════════════════════════
-
-let _manualActive = false;
-
-const MANUAL_STATE_LABELS = {
-  IDLE:    "Inactivo",
-  DIALING: "Marcando…",
-  ACTIVE:  "En llamada",
-  ENDED:   "Finalizada",
-  ERROR:   "Error",
-};
-
-function _manualSetState(state, number) {
-  const dot       = document.getElementById("manual-dot");
-  const lbl       = document.getElementById("manual-state-lbl");
-  const num       = document.getElementById("manual-state-num");
-  const btnDial   = document.getElementById("btn-manual-dial");
-  const btnHangup = document.getElementById("btn-manual-hangup");
-
-  if (dot) dot.className = "manual-state-dot " + state.toLowerCase();
-  if (lbl) lbl.textContent = MANUAL_STATE_LABELS[state] || state;
-
-  if (num) {
-    const showNum = number && state !== "IDLE" && state !== "ENDED" && state !== "ERROR";
-    num.hidden = !showNum;
-    if (showNum) num.textContent = number;
-  }
-
-  const calling  = state === "DIALING" || state === "ACTIVE";
-  _manualActive  = calling;
-
-  if (btnDial)   btnDial.disabled   = calling;
-  if (btnHangup) btnHangup.disabled = !calling;
-
-  // Bloquear lanzar campaña mientras hay llamada manual activa
-  const lb = document.getElementById("ivr-launch-btn");
-  if (lb && !ivrRunning) lb.disabled = calling;
-}
-
-function _manualLog(msg, level) {
-  const el = document.getElementById("manual-log");
-  if (!el) return;
-  const d  = document.createElement("div");
-  d.className = "manual-log-line " + (level || "info");
-  const ts = new Date().toLocaleTimeString("es-CO", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-  d.textContent = "[" + ts + "] " + msg;
-  el.appendChild(d);
-  el.scrollTop = el.scrollHeight;
-}
-
-// ── Eventos Socket.IO ─────────────────────────────────────────
-ivrSocket.on("manual_state", ({ state, number }) => {
-  _manualSetState(state, number);
-  if (state === "ENDED" || state === "ERROR") {
-    _manualActive = false;
-    const lb = document.getElementById("ivr-launch-btn");
-    if (lb && !ivrRunning) lb.disabled = false;
-  }
-});
-
-ivrSocket.on("manual_log", ({ msg, level }) => {
-  _manualLog(msg, level === "success" ? "success"
-                : level === "error"   ? "error"
-                : level);
-  addLog("📞 [Manual] " + msg,
-         level === "success" ? "ok"
-       : level === "error"   ? "err"
-       : level);
-});
-
-// ── Inicialización del panel manual ──────────────────────────
-(function initManual() {
-  const E = id => document.getElementById(id);
-
-  // Numpad — dígitos
-  document.querySelectorAll(".numpad-btn[data-digit]").forEach(btn => {
+  // Numpad
+  document.querySelectorAll(".np-btn[data-digit]").forEach(btn => {
     btn.addEventListener("click", () => {
       const inp = E("manual-number");
       if (!inp || _manualActive) return;
@@ -897,50 +647,32 @@ ivrSocket.on("manual_log", ({ msg, level }) => {
       inp.focus();
     });
   });
-
-  // Numpad — retroceso
   E("numpad-backspace")?.addEventListener("click", () => {
     const inp = E("manual-number");
     if (inp && !_manualActive) { inp.value = inp.value.slice(0, -1); inp.focus(); }
   });
-
-  // Limpiar número
   E("manual-num-clear")?.addEventListener("click", () => {
     const inp = E("manual-number");
     if (inp && !_manualActive) { inp.value = ""; inp.focus(); }
   });
-
-  // Enter → marcar
   E("manual-number")?.addEventListener("keydown", e => {
     if (e.key === "Enter") E("btn-manual-dial")?.click();
   });
 
-  // ── Botón LLAMAR ─────────────────────────────────────────────
+  // Botón LLAMAR
   E("btn-manual-dial")?.addEventListener("click", async () => {
     const inp    = E("manual-number");
     const number = inp?.value.trim();
-
-    if (!number) {
-      _manualLog("⚠️ Ingresa un número antes de marcar.", "warn");
-      inp?.focus(); return;
-    }
+    if (!number) { _manualLog("⚠️ Ingresa un número.", "warn"); inp?.focus(); return; }
     const digits = number.replace(/[+\-\s]/g, "");
     if (!/^\d+$/.test(digits) || digits.length < 6) {
-      _manualLog("❌ Número inválido (mínimo 6 dígitos numéricos).", "error");
-      return;
+      _manualLog("❌ Número inválido (mínimo 6 dígitos).", "error"); return;
     }
-
     const deviceId = E("ivr-device")?.value?.trim();
     if (!deviceId) {
-      _manualLog("❌ Selecciona un dispositivo ADB en la pestaña Campaña.", "error");
-      addLog("⚠️ Marcación manual: selecciona un dispositivo ADB primero.", "warn");
-      return;
+      _manualLog("❌ Selecciona un dispositivo ADB en Configuración.", "error"); return;
     }
-
-    if (ivrRunning) {
-      _manualLog("❌ Hay una campaña activa. Detenla primero.", "error");
-      return;
-    }
+    if (ivrRunning) { _manualLog("❌ Hay una campaña activa. Detenla primero.", "error"); return; }
 
     const inVal  = E("ivr-audio-device")?.value;
     const outVal = E("ivr-output-device")?.value;
@@ -952,51 +684,239 @@ ivrSocket.on("manual_log", ({ msg, level }) => {
 
     try {
       const r = await fetch("/ivr/manual/dial", {
-        method:  "POST",
-        headers: { "Content-Type": "application/json" },
+        method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          number,
-          device_id:           deviceId,
-          audio_device:        audioIn,
-          audio_output_device: audioOut,
+          number, device_id: deviceId,
+          audio_device: audioIn, audio_output_device: audioOut,
         }),
       });
       const d = await r.json();
       if (!d.ok) {
         _manualLog("❌ " + (d.error || "Error al marcar"), "error");
         _manualSetState("ERROR", null);
-        addLog("❌ Marcación manual: " + (d.error || "Error"), "err");
       }
-    } catch (e) {
+    } catch(e) {
       _manualLog("❌ Error de red: " + e.message, "error");
       _manualSetState("ERROR", null);
     }
   });
 
-  // ── Botón COLGAR ──────────────────────────────────────────────
+  // Botón COLGAR
   E("btn-manual-hangup")?.addEventListener("click", async () => {
-    _manualLog("🔴 Enviando señal de cuelgue…", "warn");
+    _manualLog("🔴 Colgando…", "warn");
     try {
       const r = await fetch("/ivr/manual/hangup", { method: "POST" });
       const d = await r.json();
-      if (!d.ok) _manualLog("⚠️ " + (d.error || "No hay llamada activa"), "warn");
-    } catch (e) {
-      _manualLog("❌ Error de red: " + e.message, "error");
-    }
+      if (!d.ok) _manualLog("⚠️ " + (d.error || "Sin llamada activa"), "warn");
+    } catch(e) { _manualLog("❌ Error de red: " + e.message, "error"); }
   });
 
-  // ── Restaurar estado al recargar página ──────────────────────
-  fetch("/ivr/manual/status")
-    .then(r => r.json())
-    .then(d => {
-      if (d.active) {
-        _manualSetState(d.state, d.number);
-        _manualLog("ℹ️ Llamada en curso recuperada: " + d.number, "info");
-        switchMode("manual");
+  // Restaurar estado manual al recargar
+  fetch("/ivr/manual/status").then(r => r.json()).then(d => {
+    if (d.active) {
+      _manualSetState(d.state, d.number);
+      _manualLog("ℹ️ Llamada recuperada: " + d.number, "info");
+      switchMainTab("manual");
+    }
+  }).catch(() => {});
+
+  // ══════════════════════════════════════════════════════════════
+  //  PLANTILLAS
+  // ══════════════════════════════════════════════════════════════
+
+  async function _loadTemplates() {
+    try {
+      const r = await fetch("/ivr/templates");
+      const d = await r.json();
+      const sel = E("tmpl-select"); if (!sel) return;
+      const prev = sel.value;
+      sel.innerHTML = '<option value="">— Sin plantilla —</option>';
+      (d.templates || []).forEach(t => {
+        const o = document.createElement("option");
+        o.value = t.slug;
+        o.textContent = t.name + "  [" + t.call_mode + "]";
+        sel.appendChild(o);
+      });
+      if (prev) sel.value = prev;
+    } catch(e) { addLog("❌ Error cargando plantillas: " + e.message, "err"); }
+  }
+
+  // Cargar plantilla
+  E("tmpl-load-btn")?.addEventListener("click", async () => {
+    const slug = E("tmpl-select")?.value;
+    if (!slug) { addLog("⚠️ Selecciona una plantilla primero.", "warn"); return; }
+    try {
+      const r = await fetch("/ivr/templates/" + encodeURIComponent(slug));
+      const d = await r.json();
+      if (!d.ok) { addLog("❌ " + (d.error || "Error cargando"), "err"); return; }
+      const t = d.template;
+
+      // Aplicar modo de llamada
+      if (t.call_mode) setCallMode(t.call_mode);
+
+      // Aplicar timers
+      if (t.delay_seconds  !== undefined && E("ivr-delay"))        E("ivr-delay").value = t.delay_seconds;
+      if (t.tone_timeout   !== undefined && E("ivr-tone-timeout")) E("ivr-tone-timeout").value = t.tone_timeout;
+      if (t.menu_repeats   !== undefined && E("ivr-menu-repeats")) E("ivr-menu-repeats").value = t.menu_repeats;
+
+      // Grabación
+      if (t.record_calls !== undefined && E("ivr-record-calls")) E("ivr-record-calls").checked = t.record_calls;
+
+      // Trigger digit
+      if (t.bridge_trigger_digit && E("bridge-trigger-digit"))
+        E("bridge-trigger-digit").value = t.bridge_trigger_digit;
+
+      // Nombres de audios (solo info)
+      const showAudioName = (key, nameId) => {
+        const path = t[key];
+        if (path) {
+          const fn = path.split(/[/\\]/).pop();
+          const el = E(nameId); if (el) el.textContent = "📂 " + fn;
+          audioPaths[key === "audio_welcome" ? "welcome" : key === "audio_menu" ? "menu" : "no_tone"] = path;
+        }
+      };
+      showAudioName("audio_welcome", "ivr-audio-welcome-name");
+      showAudioName("audio_menu",    "ivr-audio-menu-name");
+      showAudioName("audio_no_tone", "ivr-audio-notone-name");
+
+      // WA config
+      if (t.wa_contact !== undefined && E("wa-contact")) E("wa-contact").value = t.wa_contact || "";
+      if (t.wa_backup  !== undefined && E("wa-backup"))  E("wa-backup").value  = t.wa_backup  || "";
+      if (t.wa_enabled !== undefined && E("wa-enabled")) E("wa-enabled").checked = !!t.wa_enabled;
+
+      const missingAudio = t._missing_audio;
+      if (missingAudio?.length) {
+        addLog("⚠️ Plantilla cargada (audios faltantes: " + missingAudio.join(", ") + ")", "warn");
+      } else {
+        addLog("✅ Plantilla '" + t.name + "' cargada", "ok");
       }
-    })
-    .catch(() => {});
+    } catch(e) { addLog("❌ Error de red: " + e.message, "err"); }
+  });
+
+  // Guardar plantilla (modal)
+  E("tmpl-save-btn")?.addEventListener("click", () => {
+    const name = E("tmpl-name")?.value.trim() || "";
+    E("tmpl-save-name").value = name;
+    E("tmpl-save-modal").hidden = false;
+  });
+  E("tmpl-save-cancel")?.addEventListener("click", () => { E("tmpl-save-modal").hidden = true; });
+  E("tmpl-save-confirm")?.addEventListener("click", async () => {
+    const name = E("tmpl-save-name")?.value.trim();
+    if (!name) { addLog("⚠️ El nombre de la plantilla es obligatorio.", "warn"); return; }
+    E("tmpl-save-modal").hidden = true;
+
+    const payload = {
+      name,
+      call_mode:           _callMode,
+      delay_seconds:       parseInt(E("ivr-delay")?.value) || 5,
+      tone_timeout:        parseInt(E("ivr-tone-timeout")?.value) || 10,
+      menu_repeats:        parseInt(E("ivr-menu-repeats")?.value) || 2,
+      record_calls:        E("ivr-record-calls")?.checked || false,
+      audio_welcome:       audioPaths.welcome,
+      audio_menu:          audioPaths.menu,
+      audio_no_tone:       audioPaths.no_tone,
+      bridge_trigger_digit: E("bridge-trigger-digit")?.value || "0",
+      wa_enabled:          E("wa-enabled")?.checked || false,
+      wa_contact:          E("wa-contact")?.value || "",
+      wa_backup:           E("wa-backup")?.value  || "",
+    };
+
+    try {
+      const r = await fetch("/ivr/templates", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const d = await r.json();
+      if (d.ok) {
+        addLog("✅ Plantilla '" + name + "' guardada (slug: " + d.slug + ")", "ok");
+        await _loadTemplates();
+        const sel = E("tmpl-select"); if (sel) sel.value = d.slug;
+        if (E("tmpl-name")) E("tmpl-name").value = name;
+      } else { addLog("❌ " + (d.error || "Error guardando"), "err"); }
+    } catch(e) { addLog("❌ Error de red: " + e.message, "err"); }
+  });
+
+  // Eliminar plantilla
+  E("tmpl-del-btn")?.addEventListener("click", async () => {
+    const slug = E("tmpl-select")?.value;
+    if (!slug) { addLog("⚠️ Selecciona una plantilla para eliminar.", "warn"); return; }
+    if (!confirm("¿Eliminar la plantilla seleccionada?")) return;
+    try {
+      const r = await fetch("/ivr/templates/" + encodeURIComponent(slug), { method: "DELETE" });
+      const d = await r.json();
+      if (d.ok) { addLog("🗑 " + d.msg, "info"); await _loadTemplates(); }
+      else addLog("❌ " + (d.error || "Error"), "err");
+    } catch(e) { addLog("❌ Error de red: " + e.message, "err"); }
+  });
+
+  _loadTemplates();
+
+  // ══════════════════════════════════════════════════════════════
+  //  NOTIFICACIONES WHATSAPP
+  // ══════════════════════════════════════════════════════════════
+
+  const WA_DOTS = { closed: [], opening: ["wa-open"], ready: ["wa-ready"], error: ["wa-err"], unavailable: ["wa-err"] };
+  const WA_LBLS = { closed: "Navegador cerrado", opening: "Abriendo…", ready: "WhatsApp listo ✓", error: "Error", unavailable: "selenium no instalado" };
+
+  function _waUpdateDot(status, message, queueSize) {
+    const dot = E("wa-status-dot"); const txt = E("wa-status-txt"); const badge = E("wa-queue-badge");
+    if (dot) dot.className = "dot " + (WA_DOTS[status] || []).join(" ");
+    if (txt) txt.textContent = message || WA_LBLS[status] || status;
+    if (badge) { badge.hidden = !queueSize; if (queueSize) badge.textContent = queueSize + " en cola"; }
+  }
+
+  async function _waLoadConfig() {
+    try {
+      const r = await fetch("/ivr/wa/config"); const d = await r.json(); if (!d.ok) return;
+      const cfg = d.config || {};
+      if (E("wa-enabled")) E("wa-enabled").checked = !!cfg.enabled;
+      if (E("wa-contact")) E("wa-contact").value = cfg.contact || "";
+      if (E("wa-backup"))  E("wa-backup").value  = cfg.backup  || "";
+      const br = d.browser || {};
+      _waUpdateDot(br.status || "closed", br.message, br.queue_size || 0);
+      if (!d.available) _waUpdateDot("unavailable", "⚠ pip install selenium webdriver-manager", 0);
+    } catch {}
+  }
+
+  async function _waSaveConfig() {
+    try {
+      await fetch("/ivr/wa/config", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: E("wa-enabled")?.checked || false, contact: E("wa-contact")?.value?.trim() || "", backup: E("wa-backup")?.value?.trim() || "" })
+      });
+    } catch {}
+  }
+
+  E("wa-enabled")?.addEventListener("change", _waSaveConfig);
+  E("wa-contact")?.addEventListener("input",  debounce(_waSaveConfig, 800));
+  E("wa-backup")?.addEventListener("input",   debounce(_waSaveConfig, 800));
+
+  E("wa-open-browser")?.addEventListener("click", async () => {
+    const btn = E("wa-open-browser");
+    if (btn) { btn.disabled = true; btn.textContent = "⏳ Abriendo…"; }
+    _waUpdateDot("opening", "Iniciando Chrome…", 0); addLog("🌐 Abriendo Chrome…", "info");
+    try {
+      const r = await fetch("/ivr/wa/open_browser", { method: "POST" }); const d = await r.json();
+      if (d.ok) { addLog("✅ " + d.msg, "ok"); _waUpdateDot("opening", "Escanea el QR…", 0); }
+      else { addLog("❌ " + (d.error || d.msg || "Error"), "err"); _waUpdateDot("error", d.error || "Error", 0); }
+    } catch(e) { addLog("❌ " + e.message, "err"); _waUpdateDot("error", "Error de red", 0); }
+    finally { if (btn) { btn.disabled = false; btn.innerHTML = "🌐 Abrir WhatsApp"; } }
+  });
+
+  E("wa-close-browser")?.addEventListener("click", async () => {
+    try {
+      const r = await fetch("/ivr/wa/close_browser", { method: "POST" }); const d = await r.json();
+      if (d.ok) { addLog("🔴 Navegador cerrado", "warn"); _waUpdateDot("closed", "Navegador cerrado", 0); }
+    } catch {}
+  });
+
+  setInterval(async () => {
+    try {
+      const r = await fetch("/ivr/wa/status"); const d = await r.json();
+      _waUpdateDot(d.status || "closed", d.message, d.queue_size || 0);
+    } catch {}
+  }, 4000);
+
+  _waLoadConfig();
 
 })();
-
-

@@ -9,206 +9,331 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/static/style.css" />
   <style>
-    /* === Layout IVR fijo — anula cualquier conflicto del CSS base === */
-    html, body { height: 100%; margin: 0; overflow: hidden; }
+    html, body { height: 100%; margin: 0; overflow: hidden; background: #0a1020; color: #e2e8f0; font-family: Inter, sans-serif; }
 
-    .ivr-root {
-      position: fixed;
-      top: 56px; left: 0; right: 0; bottom: 0;
-      display: flex;
-      flex-direction: row;
-      overflow: hidden;
-      background: #0f1729;
+    /* ── HEADER ─────────────────────────────────────────────── */
+    .hdr {
+      position: fixed; top: 0; left: 0; right: 0; height: 52px;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0 18px;
+      background: rgba(10,16,32,0.96);
+      border-bottom: 1px solid rgba(255,255,255,0.07);
+      backdrop-filter: blur(14px); z-index: 200;
+    }
+    .hdr-logo { font-weight: 800; font-size: 15px; color: #818cf8; letter-spacing: -.02em; }
+    .hdr-logo span { color: #22d3ee; }
+    .hdr-right { display: flex; align-items: center; gap: 10px; font-size: 11px; color: #64748b; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: #374151; display: inline-block; flex-shrink: 0; }
+    .dot.on  { background: #4ade80; box-shadow: 0 0 6px #4ade80; }
+    .dot.dim { background: #fbbf24; }
+    .dot.err { background: #f87171; }
+
+    /* ── ROOT ───────────────────────────────────────────────── */
+    .root {
+      position: fixed; top: 52px; left: 0; right: 0; bottom: 0;
+      display: flex; overflow: hidden;
     }
 
-    /* Header */
-    .ivr-hdr {
-      position: fixed;
-      top: 0; left: 0; right: 0;
-      height: 56px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 0 20px;
-      background: rgba(15,23,41,0.95);
-      border-bottom: 1px solid rgba(255,255,255,0.08);
-      z-index: 100;
-      backdrop-filter: blur(12px);
-    }
-    .ivr-hdr-logo { font-weight: 800; font-size: 16px; color: #818cf8; letter-spacing: -0.02em; }
-    .ivr-hdr-logo span { color: #22d3ee; }
-    .ivr-hdr-status { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #94a3b8; }
-
-    /* Columna izquierda */
-    .ivr-left {
-      width: 280px;
-      flex-shrink: 0;
-      display: flex;
-      flex-direction: column;
+    /* ══════════════════════════════════════════════════════════
+       PANEL IZQUIERDO — solo configuración
+    ══════════════════════════════════════════════════════════ */
+    .cfg-panel {
+      width: 270px; flex-shrink: 0;
+      display: flex; flex-direction: column;
       border-right: 1px solid rgba(255,255,255,0.07);
-      background: rgba(255,255,255,0.02);
-      overflow: hidden;
-    }
-    .ivr-left-top {
-      flex-shrink: 0;
-      padding: 10px 14px;
-      border-bottom: 1px solid rgba(255,255,255,0.07);
-    }
-    .ivr-mic-row { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #94a3b8; margin-top: 4px; }
-    .ivr-scroll {
-      flex: 1;
-      overflow-y: auto;
-      padding: 10px 12px;
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-    }
-    .ivr-footer {
-      flex-shrink: 0;
-      padding: 10px 12px;
-      border-top: 1px solid rgba(255,255,255,0.07);
-      display: flex;
-      gap: 6px;
-    }
-    .ivr-footer .xbtn { flex: 1; justify-content: center; }
-
-    /* Columna derecha */
-    .ivr-right {
-      flex: 1;
-      min-width: 0;
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
-    }
-
-    /* Barra de estado */
-    .ivr-statbar {
-      flex-shrink: 0;
-      height: 44px;
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      padding: 0 14px;
-      border-bottom: 1px solid rgba(255,255,255,0.07);
-      background: rgba(255,255,255,0.02);
-      font-size: 12px;
-    }
-    .sval { font-size: 20px; font-weight: 700; color: #818cf8; font-family: 'JetBrains Mono', monospace; }
-    .slbl { color: #64748b; font-size: 11px; }
-    .spbar { flex: 1; height: 5px; background: rgba(255,255,255,0.07); border-radius: 3px; overflow: hidden; }
-    .spbar-fill { height: 100%; background: linear-gradient(90deg,#6366f1,#06b6d4); width: 0%; transition: width .4s; }
-    .sstatus { font-weight: 600; color: #94a3b8; font-size: 12px; }
-
-    /* Cuerpo derecho */
-    .ivr-body {
-      flex: 1;
-      min-height: 0;
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
-    }
-
-    /* Panel cola */
-    .queue-panel {
-      flex: 0 0 140px;
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
-      border-bottom: 1px solid rgba(255,255,255,0.07);
-    }
-
-    /* Panel log */
-    .log-panel {
-      flex: 1;
-      min-height: 0;
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
-      background: #0a1020;
-    }
-
-    .panel-hdr {
-      flex-shrink: 0;
-      height: 30px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 0 12px;
-      font-size: 10px;
-      font-weight: 700;
-      color: #475569;
-      text-transform: uppercase;
-      letter-spacing: .07em;
-      border-bottom: 1px solid rgba(255,255,255,0.05);
       background: rgba(255,255,255,0.015);
+      overflow: hidden;
+    }
+    .cfg-title {
+      flex-shrink: 0; padding: 10px 14px 8px;
+      font-size: 10px; font-weight: 700; color: #475569;
+      text-transform: uppercase; letter-spacing: .1em;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+      background: rgba(255,255,255,0.02);
+    }
+    .cfg-scroll {
+      flex: 1; overflow-y: auto; padding: 10px 12px;
+      display: flex; flex-direction: column; gap: 12px;
+    }
+    .cfg-scroll::-webkit-scrollbar { width: 4px; }
+    .cfg-scroll::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 2px; }
+
+    /* Secciones de config */
+    .cfg-section {
+      display: flex; flex-direction: column; gap: 8px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid rgba(255,255,255,0.05);
+    }
+    .cfg-section:last-child { border-bottom: none; }
+    .cfg-sec-title {
+      font-size: 10px; font-weight: 700; color: #6366f1;
+      text-transform: uppercase; letter-spacing: .08em;
+      margin-bottom: 2px;
+    }
+    .cfg-sec-title.cyan  { color: #22d3ee; }
+    .cfg-sec-title.green { color: #34d399; }
+    .cfg-sec-title.pink  { color: #f472b6; }
+    .cfg-sec-title.wa    { color: #25d366; }
+    .cfg-sec-title.tmpl  { color: #fbbf24; }
+
+    /* Campos dentro de la config */
+    .fld { display: flex; flex-direction: column; gap: 3px; }
+    .flbl { font-size: 10px; font-weight: 600; color: #475569; text-transform: uppercase; letter-spacing: .06em; }
+    .frow { display: flex; align-items: center; gap: 5px; }
+    .fsel, .finp {
+      background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 6px; color: #e2e8f0; font-size: 12px;
+      padding: 5px 8px; font-family: Inter, sans-serif; outline: none;
+    }
+    .fsel:focus, .finp:focus { border-color: rgba(99,102,241,0.5); }
+    .fsel option, select option { background: #1e293b; color: #e2e8f0; }
+    .fsel { flex: 1; min-width: 0; }
+    .finp { width: 100%; box-sizing: border-box; }
+    .fsub { font-size: 10px; color: #475569; }
+    .fname { font-size: 11px; color: #64748b; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 130px; }
+    .fbadge {
+      display: inline-block; background: rgba(99,102,241,0.2); color: #818cf8;
+      border-radius: 4px; font-size: 10px; font-weight: 600; padding: 2px 6px;
     }
 
-    .queue-scroll {
-      flex: 1;
-      overflow-y: auto;
-      min-height: 0;
+    /* ── Selector de Modo de Llamada ── */
+    .call-mode-btns { display: flex; gap: 4px; flex-wrap: wrap; }
+    .call-mode-btn {
+      flex: 1; min-width: 60px; padding: 5px 4px; border-radius: 7px;
+      border: 1px solid rgba(255,255,255,0.1); background: rgba(255,255,255,0.04);
+      color: #64748b; font-size: 10px; font-weight: 600; font-family: Inter, sans-serif;
+      cursor: pointer; text-align: center; transition: all .15s; white-space: nowrap;
     }
-    .queue-table { width: 100%; border-collapse: collapse; font-size: 12px; }
-    .queue-table th { padding: 3px 10px; text-align: left; color: #475569; font-size: 10px; font-weight: 600; text-transform: uppercase; position: sticky; top:0; background: #0f1729; }
-    .queue-table td { padding: 4px 10px; border-bottom: 1px solid rgba(255,255,255,0.04); color: #e2e8f0; font-family: 'JetBrains Mono',monospace; font-size: 12px; }
-
-    /* LOG */
-    #ivr-log {
-      flex: 1;
-      min-height: 0;
-      overflow-y: auto;
-      padding: 8px 14px;
-      font-family: 'JetBrains Mono', monospace;
-      font-size: 12px;
-      line-height: 1.7;
-      display: flex;
-      flex-direction: column;
-      gap: 1px;
-      scrollbar-width: thin;
-      scrollbar-color: rgba(255,255,255,0.1) transparent;
+    .call-mode-btn:hover { background: rgba(255,255,255,0.08); color: #94a3b8; }
+    .call-mode-btn.active {
+      background: rgba(99,102,241,0.18); color: #818cf8;
+      border-color: rgba(99,102,241,0.35);
     }
-    .log-line { word-break: break-word; }
+    .call-mode-btn.bridge.active {
+      background: rgba(6,182,212,0.15); color: #22d3ee;
+      border-color: rgba(6,182,212,0.35);
+    }
+    .call-mode-btn.combo.active {
+      background: rgba(52,211,153,0.12); color: #34d399;
+      border-color: rgba(52,211,153,0.35);
+    }
 
-    /* Audio Visualizer */
-    .viz-panel {
-      flex-shrink: 0;
-      background: #060d1a;
+    /* Secciones que se muestran/ocultan según el modo */
+    .mode-section { display: none; flex-direction: column; gap: 8px; }
+    .mode-section.visible { display: flex; }
+
+    /* Opciones IVR */
+    .opt-list { display: flex; flex-direction: column; gap: 5px; max-height: 200px; overflow-y: auto; }
+    .opt-row {
+      display: flex; flex-direction: column; gap: 3px;
+      background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.07);
+      border-radius: 6px; padding: 5px 7px;
+    }
+    .opt-row-top { display: flex; gap: 4px; align-items: center; }
+    .opt-row-bye { display: flex; gap: 4px; align-items: center; font-size: 10px; color: #64748b; }
+
+    /* Toggle switch */
+    .toggle { position: relative; display: inline-block; width: 34px; height: 18px; cursor: pointer; flex-shrink: 0; }
+    .toggle input { opacity: 0; width: 0; height: 0; }
+    .toggle-slider {
+      position: absolute; inset: 0; background: rgba(255,255,255,0.1);
+      border-radius: 18px; transition: background .25s; border: 1px solid rgba(255,255,255,0.12);
+    }
+    .toggle-slider::before {
+      content: ''; position: absolute; width: 13px; height: 13px;
+      left: 2px; top: 2px; background: #64748b;
+      border-radius: 50%; transition: transform .25s, background .25s;
+    }
+    .toggle input:checked + .toggle-slider { background: rgba(99,102,241,.3); border-color: #818cf8; }
+    .toggle input:checked + .toggle-slider::before { transform: translateX(16px); background: #818cf8; }
+    .toggle.wa input:checked + .toggle-slider { background: rgba(37,211,102,.25); border-color: #25d366; }
+    .toggle.wa input:checked + .toggle-slider::before { background: #25d366; }
+    .toggle.rec input:checked + .toggle-slider { background: rgba(244,114,182,.2); border-color: #f472b6; }
+    .toggle.rec input:checked + .toggle-slider::before { background: #f472b6; }
+
+    /* Plantillas */
+    .tmpl-list { display: flex; flex-direction: column; gap: 4px; max-height: 130px; overflow-y: auto; }
+    .tmpl-item {
+      display: flex; align-items: center; gap: 5px;
+      padding: 4px 8px; border-radius: 6px;
+      background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.07);
+      cursor: pointer; transition: background .14s;
+    }
+    .tmpl-item:hover { background: rgba(255,255,255,0.08); }
+    .tmpl-item-name { flex: 1; font-size: 11px; color: #e2e8f0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .tmpl-item-mode { font-size: 9px; color: #475569; font-family: 'JetBrains Mono', monospace; }
+    .tmpl-del { background: none; border: none; color: #475569; cursor: pointer; font-size: 13px; padding: 0 2px; }
+    .tmpl-del:hover { color: #f87171; }
+
+    /* ══════════════════════════════════════════════════════════
+       PANEL DERECHO — marcación
+    ══════════════════════════════════════════════════════════ */
+    .main-panel {
+      flex: 1; min-width: 0;
+      display: flex; flex-direction: column; overflow: hidden;
+    }
+
+    /* Tabs principales */
+    .main-tabs {
+      flex-shrink: 0; display: flex; gap: 0;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+      background: rgba(255,255,255,0.02);
+    }
+    .main-tab {
+      padding: 10px 20px; border: none; background: transparent;
+      color: #64748b; font-size: 12px; font-weight: 600;
+      font-family: Inter, sans-serif; cursor: pointer;
+      border-bottom: 2px solid transparent; transition: all .15s;
+    }
+    .main-tab:hover { color: #94a3b8; }
+    .main-tab.active { color: #818cf8; border-bottom-color: #818cf8; }
+    .main-tab.manual.active { color: #22d3ee; border-bottom-color: #22d3ee; }
+
+    /* Área de contenido de cada tab */
+    .tab-content { display: none; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }
+    .tab-content.active { display: flex; }
+
+    /* ── Tab Automática ── */
+    .auto-top {
+      flex-shrink: 0; padding: 10px 14px;
       border-bottom: 1px solid rgba(255,255,255,0.07);
-      padding: 6px 12px 8px;
+      display: flex; flex-direction: column; gap: 8px;
     }
-    .viz-row {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      margin-bottom: 5px;
+    .auto-launch-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+
+    /* Status bar */
+    .statbar {
+      flex-shrink: 0; height: 40px;
+      display: flex; align-items: center; gap: 10px; padding: 0 14px;
+      border-bottom: 1px solid rgba(255,255,255,0.07);
+      background: rgba(255,255,255,0.015); font-size: 12px;
     }
+    .sval { font-size: 18px; font-weight: 700; color: #818cf8; font-family: 'JetBrains Mono', monospace; }
+    .slbl { color: #64748b; font-size: 11px; }
+    .spbar { flex: 1; height: 4px; background: rgba(255,255,255,0.07); border-radius: 3px; overflow: hidden; }
+    .spbar-fill { height: 100%; background: linear-gradient(90deg,#6366f1,#06b6d4); width: 0%; transition: width .4s; }
+    .sstatus { font-weight: 600; color: #94a3b8; font-size: 11px; }
+
+    /* Cola de llamadas */
+    .queue-panel {
+      flex: 0 0 130px; display: flex; flex-direction: column;
+      overflow: hidden; border-bottom: 1px solid rgba(255,255,255,0.07);
+    }
+    .queue-scroll { flex: 1; overflow-y: auto; min-height: 0; }
+    .queue-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .queue-table th {
+      padding: 3px 10px; text-align: left; color: #475569; font-size: 10px;
+      font-weight: 600; text-transform: uppercase; position: sticky; top: 0; background: #0f1729;
+    }
+    .queue-table td {
+      padding: 4px 10px; border-bottom: 1px solid rgba(255,255,255,0.04);
+      color: #e2e8f0; font-family: 'JetBrains Mono', monospace; font-size: 12px;
+    }
+
+    /* ── Tab Manual ── */
+    .manual-top {
+      flex-shrink: 0; padding: 12px 14px 8px;
+      display: flex; gap: 14px; align-items: flex-start;
+      border-bottom: 1px solid rgba(255,255,255,0.07);
+    }
+    /* Estado llamada manual */
+    .manual-state-bar {
+      display: flex; align-items: center; gap: 8px; padding: 7px 10px;
+      border-radius: 8px; background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.08); font-size: 12px;
+      margin-bottom: 8px;
+    }
+    .msdot { width: 9px; height: 9px; border-radius: 50%; background: #374151; flex-shrink: 0; transition: all .3s; }
+    .msdot.idle    { background: #374151; }
+    .msdot.dialing { background: #fbbf24; box-shadow: 0 0 8px #fbbf24; animation: mspulse 1s infinite; }
+    .msdot.active  { background: #4ade80; box-shadow: 0 0 8px #4ade80; }
+    .msdot.ended   { background: #64748b; }
+    .msdot.error   { background: #f87171; }
+    @keyframes mspulse { 0%,100% { opacity:1; } 50% { opacity:.35; } }
+    .ms-lbl { font-weight: 600; color: #94a3b8; flex: 1; }
+    .ms-num { font-family: 'JetBrains Mono', monospace; font-size: 13px; color: #22d3ee; }
+
+    /* Input + numpad */
+    .dial-col { display: flex; flex-direction: column; gap: 8px; min-width: 200px; }
+    .num-wrap { position: relative; }
+    .num-input {
+      width: 100%; box-sizing: border-box; background: rgba(255,255,255,0.07);
+      border: 1px solid rgba(255,255,255,0.15); border-radius: 9px;
+      color: #e2e8f0; font-size: 20px; font-family: 'JetBrains Mono', monospace;
+      font-weight: 700; padding: 9px 38px 9px 12px; letter-spacing: .1em;
+      text-align: center; outline: none; transition: border-color .2s;
+    }
+    .num-input:focus { border-color: rgba(6,182,212,0.5); }
+    .num-clear {
+      position: absolute; right: 9px; top: 50%; transform: translateY(-50%);
+      background: none; border: none; color: #475569; font-size: 15px;
+      cursor: pointer; padding: 2px 4px; border-radius: 4px; transition: color .15s;
+    }
+    .num-clear:hover { color: #f87171; }
+    .numpad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; }
+    .np-btn {
+      background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.09);
+      border-radius: 7px; color: #e2e8f0; font-size: 15px; font-weight: 600;
+      font-family: Inter, sans-serif; padding: 9px 4px 7px;
+      cursor: pointer; text-align: center; transition: background .1s, transform .08s;
+      line-height: 1.1; user-select: none;
+    }
+    .np-btn sub { display: block; font-size: 7px; font-weight: 400; color: #475569; letter-spacing: .1em; min-height: 7px; }
+    .np-btn:hover  { background: rgba(255,255,255,0.1); }
+    .np-btn:active { transform: scale(.93); background: rgba(6,182,212,0.15); }
+    .np-btn.sp     { color: #94a3b8; }
+    .np-btn.bk     { color: #f87171; }
+    .dial-btns { display: flex; gap: 6px; }
+    .dial-btns .xbtn { flex: 1; justify-content: center; font-size: 13px; padding: 9px 6px; }
+    .btn-dial   { background: linear-gradient(135deg,#059669,#10b981); color: #fff; border: none; }
+    .btn-dial:hover { opacity: .88; }
+    .btn-dial:disabled { opacity: .35; cursor: not-allowed; }
+    .btn-hangup { background: rgba(239,68,68,0.17); color: #f87171; border: 1px solid rgba(239,68,68,0.28); }
+    .btn-hangup:hover { background: rgba(239,68,68,0.28); }
+    .btn-hangup:disabled { opacity: .35; cursor: not-allowed; }
+
+    /* Log manual (derecha del numpad) */
+    .manual-log-col { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+    .manual-log {
+      flex: 1; min-height: 80px; max-height: 250px; overflow-y: auto;
+      font-family: 'JetBrains Mono', monospace; font-size: 11px; line-height: 1.6;
+      background: rgba(0,0,0,0.25); border-radius: 7px;
+      border: 1px solid rgba(255,255,255,0.06); padding: 6px 10px; color: #64748b;
+    }
+    .ml-line.ok      { color: #4ade80; }
+    .ml-line.error   { color: #f87171; }
+    .ml-line.warn    { color: #fbbf24; }
+    .ml-line.success { color: #34d399; }
+    .ml-line.info    { color: #94a3b8; }
+
+    /* ── Zona compartida (viz + log) ── */
+    .shared-bottom { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+
+    /* Visualizador */
+    .viz-panel {
+      flex-shrink: 0; background: #060d1a;
+      border-bottom: 1px solid rgba(255,255,255,0.07); padding: 6px 12px 8px;
+    }
+    .viz-row { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
     .viz-row:last-child { margin-bottom: 0; }
-    .viz-label {
-      font-size: 9px;
-      font-weight: 700;
-      letter-spacing: .08em;
-      text-transform: uppercase;
-      width: 52px;
-      flex-shrink: 0;
-      color: #475569;
+    .viz-lbl { font-size: 9px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; width: 50px; flex-shrink: 0; color: #475569; }
+    .viz-lbl.in  { color: #22d3ee; }
+    .viz-lbl.out { color: #a78bfa; }
+    .viz-canvas { flex: 1; height: 40px; border-radius: 4px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06); display: block; }
+    .viz-db { font-size: 9px; font-family: 'JetBrains Mono', monospace; color: #475569; width: 36px; text-align: right; flex-shrink: 0; }
+
+    /* Log principal */
+    .log-panel { flex: 1; min-height: 0; display: flex; flex-direction: column; background: #0a1020; overflow: hidden; }
+    .panel-hdr {
+      flex-shrink: 0; height: 28px; display: flex; align-items: center; justify-content: space-between;
+      padding: 0 12px; font-size: 10px; font-weight: 700; color: #475569;
+      text-transform: uppercase; letter-spacing: .07em;
+      border-bottom: 1px solid rgba(255,255,255,0.05); background: rgba(255,255,255,0.015);
     }
-    .viz-label.in  { color: #22d3ee; }
-    .viz-label.out { color: #a78bfa; }
-    .viz-canvas {
-      flex: 1;
-      height: 42px;
-      border-radius: 4px;
-      background: rgba(255,255,255,0.03);
-      border: 1px solid rgba(255,255,255,0.06);
-      display: block;
-    }
-    .viz-db {
-      font-size: 9px;
-      font-family: 'JetBrains Mono', monospace;
-      color: #475569;
-      width: 38px;
-      text-align: right;
-      flex-shrink: 0;
+    #ivr-log {
+      flex: 1; min-height: 0; overflow-y: auto; padding: 6px 14px;
+      font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 1.7;
+      display: flex; flex-direction: column; gap: 1px;
     }
     .log-line.ok   { color: #4ade80; }
     .log-line.err  { color: #f87171; }
@@ -216,617 +341,431 @@
     .log-line.info { color: #94a3b8; }
     .log-line.dbg  { color: #475569; }
 
-    /* Campos */
-    .fld { display: flex; flex-direction: column; gap: 4px; }
-    .flbl { font-size: 10px; font-weight: 700; color: #475569; text-transform: uppercase; letter-spacing: .06em; }
-    .frow { display: flex; align-items: center; gap: 6px; }
-    .fname { font-size: 11px; color: #64748b; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 130px; }
-    .fsel, .finp {
-      background: rgba(255,255,255,0.05);
-      border: 1px solid rgba(255,255,255,0.1);
-      border-radius: 6px;
-      color: #e2e8f0;
-      font-size: 12px;
-      padding: 5px 8px;
-      font-family: Inter, sans-serif;
-    }
-    /* Fondo oscuro para las opciones del desplegable */
-    .fsel option, select option {
-      background: #1e293b;
-      color: #e2e8f0;
-    }
-    .fsel { flex: 1; min-width: 0; }
-    .finp { width: 100%; }
-    .fbadge {
-      display: inline-block;
-      background: rgba(99,102,241,0.2);
-      color: #818cf8;
-      border-radius: 4px;
-      font-size: 10px;
-      font-weight: 600;
-      padding: 2px 6px;
-    }
-    .opt-list { display: flex; flex-direction: column; gap: 6px; max-height: 220px; overflow-y: auto; }
-    .opt-row  {
-      display: flex;
-      flex-direction: column;
-      gap: 3px;
-      background: rgba(255,255,255,0.03);
-      border: 1px solid rgba(255,255,255,0.07);
-      border-radius: 6px;
-      padding: 6px 8px;
-    }
-    .opt-row-top  { display: flex; gap: 5px; align-items: center; }
-    .opt-row-bye  { display: flex; gap: 5px; align-items: center; font-size: 10px; color: #64748b; }
-    .opt-row-bye label { white-space: nowrap; }
-
-    /* Botones */
+    /* ── Botones genéricos ── */
     .xbtn {
       display: inline-flex; align-items: center; gap: 4px;
-      padding: 5px 10px;
-      border-radius: 6px;
-      font-size: 12px; font-weight: 500;
-      border: none; cursor: pointer;
-      font-family: Inter, sans-serif;
-      white-space: nowrap;
-      transition: opacity .15s;
+      padding: 5px 10px; border-radius: 6px;
+      font-size: 12px; font-weight: 500; border: none; cursor: pointer;
+      font-family: Inter, sans-serif; white-space: nowrap; transition: opacity .15s;
     }
     .xg  { background: rgba(255,255,255,0.07); color: #e2e8f0; border: 1px solid rgba(255,255,255,0.1); }
     .xg:hover  { background: rgba(255,255,255,0.13); }
-    .xp  { background: linear-gradient(135deg,#6366f1,#4f46e5); color:#fff; }
-    .xp:hover  { opacity:.88; }
-    .xp:disabled { opacity:.35; cursor:not-allowed; }
-    .xr  { background: rgba(239,68,68,0.15); color:#f87171; border:1px solid rgba(239,68,68,0.25); }
-    .xr:hover  { background: rgba(239,68,68,0.25); }
-    .xr:disabled { opacity:.35; cursor:not-allowed; }
-    .xa  { background: rgba(6,182,212,0.15); color:#22d3ee; border:1px solid rgba(6,182,212,0.25); }
+    .xp  { background: linear-gradient(135deg,#6366f1,#4f46e5); color: #fff; }
+    .xp:hover  { opacity: .88; }
+    .xp:disabled { opacity: .35; cursor: not-allowed; }
+    .xr  { background: rgba(239,68,68,0.14); color: #f87171; border: 1px solid rgba(239,68,68,0.24); }
+    .xr:hover  { background: rgba(239,68,68,0.24); }
+    .xr:disabled { opacity: .35; cursor: not-allowed; }
+    .xa  { background: rgba(6,182,212,0.14); color: #22d3ee; border: 1px solid rgba(6,182,212,0.24); }
+    .xa:hover  { background: rgba(6,182,212,0.24); }
+    .xo  { background: rgba(245,158,11,0.14); color: #fbbf24; border: 1px solid rgba(245,158,11,0.24); }
+    .xo:disabled { opacity: .35; cursor: not-allowed; }
 
     /* Pills */
     .pill { display: inline-block; padding: 2px 7px; border-radius: 5px; font-size: 10px; font-weight: 700; text-transform: uppercase; }
-    .p-pend { background: rgba(255,255,255,0.07); color:#94a3b8; }
-    .p-call { background: rgba(99,102,241,0.2);   color:#818cf8; }
-    .p-act  { background: rgba(6,182,212,0.2);    color:#22d3ee; }
-    .p-ok   { background: rgba(34,197,94,0.2);    color:#4ade80; }
-    .p-warn { background: rgba(245,158,11,0.15);  color:#fbbf24; }
-    .p-disc { background: rgba(251,146,60,0.2);   color:#fb923c; }  /* 📵 colgó durante llamada */
-    .p-off  { background: rgba(100,116,139,0.18); color:#94a3b8; border:1px solid rgba(100,116,139,0.28); }  /* ⛔ apagado/no disponible */
-    .p-err  { background: rgba(239,68,68,0.15);   color:#f87171; }
-
-    /* Dot */
-    .dot {
-      width: 8px; height: 8px; border-radius: 50%;
-      background: #374151; display: inline-block; flex-shrink: 0;
-    }
-    .dot.on  { background: #4ade80; box-shadow: 0 0 6px #4ade80; }
-    .dot.dim { background: #fbbf24; }
-    .dot.err { background: #f87171; }
+    .p-pend { background: rgba(255,255,255,0.07); color: #94a3b8; }
+    .p-call { background: rgba(99,102,241,0.2);   color: #818cf8; }
+    .p-act  { background: rgba(6,182,212,0.2);    color: #22d3ee; }
+    .p-ok   { background: rgba(34,197,94,0.2);    color: #4ade80; }
+    .p-warn { background: rgba(245,158,11,0.15);  color: #fbbf24; }
+    .p-disc { background: rgba(251,146,60,0.2);   color: #fb923c; }
+    .p-off  { background: rgba(100,116,139,0.18); color: #94a3b8; border: 1px solid rgba(100,116,139,0.28); }
+    .p-err  { background: rgba(239,68,68,0.15);   color: #f87171; }
+    .p-brdg { background: rgba(6,182,212,0.15);   color: #22d3ee; border: 1px solid rgba(6,182,212,0.25); }
 
     /* Modal */
-    .modal-bg {
-      position: fixed; inset: 0;
-      background: rgba(0,0,0,.75);
-      display: flex; align-items: center; justify-content: center;
-      z-index: 9999;
-    }
+    .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,.75); display: flex; align-items: center; justify-content: center; z-index: 9999; }
     .modal-bg[hidden] { display: none; }
-    .modal-box {
-      background: #1e293b;
-      border: 1px solid rgba(255,255,255,0.1);
-      border-radius: 14px;
-      padding: 24px;
-      min-width: 320px; max-width: 420px; width: 90%;
-    }
-    .modal-box h3 { margin: 0 0 8px; font-size: 16px; color: #e2e8f0; }
+    .modal-box { background: #1e293b; border: 1px solid rgba(255,255,255,0.1); border-radius: 14px; padding: 22px; min-width: 300px; max-width: 400px; width: 90%; }
+    .modal-box h3 { margin: 0 0 8px; font-size: 15px; color: #e2e8f0; }
     .modal-box p  { color: #94a3b8; font-size: 13px; margin: 0; }
-    .modal-acts { display: flex; gap: 10px; justify-content: flex-end; margin-top: 14px; }
+    .modal-acts   { display: flex; gap: 10px; justify-content: flex-end; margin-top: 14px; }
 
-    /* Logo text */
-    .logo-txt { font-weight: 800; font-size: 16px; }
-    .logo-txt .acc { color: #22d3ee; }
-
-    /* Scrollbars */
-    ::-webkit-scrollbar { width: 5px; }
-    ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 3px; }
-
-    /* ── WhatsApp toggle switch ── */
-    .wa-toggle { position: relative; display: inline-block; width: 36px; height: 20px; cursor: pointer; flex-shrink:0; }
-    .wa-toggle input { opacity: 0; width: 0; height: 0; }
-    .wa-slider {
-      position: absolute; inset: 0;
-      background: rgba(255,255,255,0.1);
-      border-radius: 20px;
-      transition: background .25s;
-      border: 1px solid rgba(255,255,255,0.12);
-    }
-    .wa-slider::before {
-      content: '';
-      position: absolute;
-      width: 14px; height: 14px;
-      left: 2px; top: 2px;
-      background: #64748b;
-      border-radius: 50%;
-      transition: transform .25s, background .25s;
-    }
-    .wa-toggle input:checked + .wa-slider { background: rgba(37,211,102,.25); border-color: #25d366; }
-    .wa-toggle input:checked + .wa-slider::before { transform: translateX(16px); background: #25d366; }
-
-    /* WA status dot colors */
+    /* ADB status dot inline */
+    .adb-row { display: flex; align-items: center; gap: 6px; font-size: 10px; color: #64748b; margin-top: 2px; }
+    /* WA status dot */
     .dot.wa-ready { background: #25d366; box-shadow: 0 0 6px #25d366; }
-    .dot.wa-open  { background: #fbbf24; box-shadow: 0 0 6px #fbbf24; }
+    .dot.wa-open  { background: #fbbf24; }
     .dot.wa-err   { background: #f87171; }
-    /* ── Tabs de modo ───────────────────────────────────────── */
-    .mode-tabs {
-      display: flex;
-      gap: 3px;
-      padding: 8px 10px 0;
-      background: rgba(255,255,255,0.02);
-      border-bottom: 1px solid rgba(255,255,255,0.07);
-    }
-    .mode-tab {
-      flex: 1;
-      padding: 7px 6px;
-      border-radius: 7px 7px 0 0;
-      border: none;
-      background: transparent;
-      color: #64748b;
-      font-size: 11px;
-      font-weight: 600;
-      font-family: Inter, sans-serif;
-      cursor: pointer;
-      transition: all .18s;
-      text-align: center;
-      letter-spacing: .01em;
-    }
-    .mode-tab:hover  { color: #94a3b8; background: rgba(255,255,255,0.04); }
-    .mode-tab.active { color: #818cf8; background: rgba(99,102,241,0.12);
-                       border: 1px solid rgba(99,102,241,0.22);
-                       border-bottom: none; }
-    .mode-tab.manual.active { color: #22d3ee; background: rgba(6,182,212,0.1);
-                              border-color: rgba(6,182,212,0.22); }
 
-    /* ── Panel Manual ────────────────────────────────────── */
-    .manual-panel {
-      display: none;
-      flex-direction: column;
-      gap: 14px;
-      padding: 14px 14px 0;
-    }
-    .manual-panel.visible { display: flex; }
-
-    /* Estado de llamada manual */
-    .manual-state-bar {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      padding: 8px 10px;
-      border-radius: 8px;
-      background: rgba(255,255,255,0.04);
-      border: 1px solid rgba(255,255,255,0.08);
-      font-size: 12px;
-    }
-    .manual-state-dot { width: 9px; height: 9px; border-radius: 50%; background: #374151; flex-shrink: 0; transition: all .3s; }
-    .manual-state-dot.idle    { background: #374151; }
-    .manual-state-dot.dialing { background: #fbbf24; box-shadow: 0 0 8px #fbbf24; animation: pulse 1s infinite; }
-    .manual-state-dot.active  { background: #4ade80; box-shadow: 0 0 8px #4ade80; }
-    .manual-state-dot.ended   { background: #64748b; }
-    .manual-state-dot.error   { background: #f87171; }
-    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .4; } }
-    .manual-state-lbl { font-weight: 600; color: #94a3b8; flex: 1; }
-    .manual-state-num { font-family: 'JetBrains Mono', monospace; font-size: 13px; color: #22d3ee; }
-
-    /* Input de número */
-    .manual-num-wrap {
-      position: relative;
-    }
-    .manual-num-input {
-      width: 100%;
-      box-sizing: border-box;
-      background: rgba(255,255,255,0.06);
-      border: 1px solid rgba(255,255,255,0.14);
-      border-radius: 9px;
-      color: #e2e8f0;
-      font-size: 20px;
-      font-family: 'JetBrains Mono', monospace;
-      font-weight: 600;
-      padding: 10px 42px 10px 14px;
-      letter-spacing: .12em;
-      text-align: center;
-      outline: none;
-      transition: border-color .2s;
-    }
-    .manual-num-input:focus { border-color: rgba(6,182,212,0.5); }
-    .manual-num-clear {
-      position: absolute;
-      right: 10px; top: 50%;
-      transform: translateY(-50%);
-      background: none; border: none;
-      color: #475569; font-size: 16px;
-      cursor: pointer; padding: 2px 4px;
-      border-radius: 4px;
-      transition: color .15s;
-    }
-    .manual-num-clear:hover { color: #f87171; }
-
-    /* Teclado numérico */
-    .numpad {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 5px;
-    }
-    .numpad-btn {
-      background: rgba(255,255,255,0.05);
-      border: 1px solid rgba(255,255,255,0.09);
-      border-radius: 8px;
-      color: #e2e8f0;
-      font-size: 16px;
-      font-weight: 600;
-      font-family: Inter, sans-serif;
-      padding: 10px 4px 8px;
-      cursor: pointer;
-      text-align: center;
-      transition: background .12s, transform .1s;
-      line-height: 1.1;
-      user-select: none;
-    }
-    .numpad-btn sub { display: block; font-size: 7px; font-weight: 400; color: #475569; letter-spacing: .12em; min-height: 8px; }
-    .numpad-btn:hover   { background: rgba(255,255,255,0.1); }
-    .numpad-btn:active  { transform: scale(.94); background: rgba(6,182,212,0.15); }
-    .numpad-btn.special { color: #94a3b8; font-size: 18px; }
-    .numpad-btn.backsp  { color: #f87171; }
-
-    /* Botones Llamar / Colgar */
-    .manual-call-btns { display: flex; gap: 8px; }
-    .manual-call-btns .xbtn { flex: 1; justify-content: center; font-size: 13px; padding: 9px; }
-    .btn-dial   { background: linear-gradient(135deg,#059669,#10b981); color: #fff; }
-    .btn-dial:hover { opacity: .88; }
-    .btn-dial:disabled { opacity: .35; cursor: not-allowed; }
-    .btn-hangup { background: rgba(239,68,68,0.18); color: #f87171; border: 1px solid rgba(239,68,68,0.3); }
-    .btn-hangup:hover { background: rgba(239,68,68,0.3); }
-    .btn-hangup:disabled { opacity: .35; cursor: not-allowed; }
-
-    /* Log manual */
-    .manual-log {
-      flex: 1;
-      min-height: 70px;
-      max-height: 120px;
-      overflow-y: auto;
-      font-family: 'JetBrains Mono', monospace;
-      font-size: 11px;
-      line-height: 1.6;
-      color: #64748b;
-      background: rgba(0,0,0,0.2);
-      border-radius: 7px;
-      border: 1px solid rgba(255,255,255,0.06);
-      padding: 6px 10px;
-    }
-    .manual-log-line.ok      { color: #4ade80; }
-    .manual-log-line.error   { color: #f87171; }
-    .manual-log-line.warn    { color: #fbbf24; }
-    .manual-log-line.success { color: #34d399; }
-    .manual-log-line.info    { color: #94a3b8; }
+    /* Input bridge trigger digit */
+    .bridge-trigger-row { display: flex; gap: 5px; align-items: center; }
   </style>
 </head>
-<body style="background:#0f1729;color:#e2e8f0;font-family:Inter,sans-serif;">
+<body>
 
-<!-- Header -->
-<div class="ivr-hdr">
-  <div class="logo-txt">IVR<span class="acc">Automator</span></div>
-  <div class="ivr-hdr-status">
-    <span class="dot on" id="srv-dot"></span>
-    <span>Servidor activo</span>
+<!-- HEADER -->
+<div class="hdr">
+  <div class="hdr-logo">IVR<span>Automator</span></div>
+  <div class="hdr-right">
+    <span class="dot on" id="srv-dot"></span><span>Servidor activo</span>
     &nbsp;|&nbsp;
-    <span class="dot" id="mic-dot"></span>
-    <span id="mic-txt">Detector inactivo</span>
+    <span class="dot" id="mic-dot"></span><span id="mic-txt">Detector inactivo</span>
   </div>
 </div>
 
-<!-- Contenedor principal -->
-<div class="ivr-root">
+<!-- ROOT -->
+<div class="root">
 
-  <!-- ── COLUMNA IZQUIERDA ── -->
-  <div class="ivr-left">
+  <!-- ══════════════ PANEL IZQUIERDO — CONFIGURACIÓN ══════════════ -->
+  <div class="cfg-panel">
+    <div class="cfg-title">⚙️ Configuración</div>
+    <div class="cfg-scroll">
 
-    <!-- Tabs de modo -->
-    <div class="mode-tabs">
-      <button class="mode-tab active" id="tab-campaign" onclick="switchMode('campaign')">
-        &#x1F4CB; Campa&ntilde;a
-      </button>
-      <button class="mode-tab manual" id="tab-manual" onclick="switchMode('manual')">
-        &#x1F4DE; Manual
-      </button>
-    </div>
-
-    <!-- Encabezado panel campa&ntilde;a -->
-    <div class="ivr-left-top" id="panel-campaign-hdr">
-      <div style="font-weight:700;font-size:13px;color:#818cf8;margin-bottom:2px">Configuracion de Campana</div>
-      <div class="ivr-mic-row">
-        <span class="dot" id="mic-dot2"></span>
-        <span id="mic-txt2">Detector inactivo</span>
+      <!-- Plantillas -->
+      <div class="cfg-section">
+        <div class="cfg-sec-title tmpl">📑 Plantillas</div>
+        <div class="frow" style="gap:5px">
+          <select class="fsel" id="tmpl-select" style="flex:1">
+            <option value="">— Sin plantilla —</option>
+          </select>
+          <button class="xbtn xg" id="tmpl-load-btn" style="padding:5px 8px;font-size:11px" title="Cargar plantilla">📂</button>
+          <button class="xbtn xo" id="tmpl-save-btn" style="padding:5px 8px;font-size:11px" title="Guardar plantilla actual">💾</button>
+          <button class="xbtn xr" id="tmpl-del-btn"  style="padding:5px 8px;font-size:11px" title="Eliminar plantilla">🗑</button>
+        </div>
+        <input class="finp" type="text" id="tmpl-name" placeholder="Nombre de la plantilla" style="font-size:11px" />
       </div>
-    </div>
-
-    <!-- Panel marcaci&oacute;n manual -->
-    <div class="manual-panel" id="panel-manual">
-      <!-- Estado -->
-      <div class="manual-state-bar">
-        <span class="manual-state-dot idle" id="manual-dot"></span>
-        <span class="manual-state-lbl" id="manual-state-lbl">Inactivo</span>
-        <span class="manual-state-num" id="manual-state-num" hidden></span>
-      </div>
-
-      <!-- Input n&uacute;mero -->
-      <div class="manual-num-wrap">
-        <input class="manual-num-input" type="tel" id="manual-number"
-               placeholder="N&uacute;mero" maxlength="20"
-               inputmode="numeric" autocomplete="tel" />
-        <button class="manual-num-clear" id="manual-num-clear" title="Borrar">&times;</button>
-      </div>
-
-      <!-- Teclado -->
-      <div class="numpad" id="numpad">
-        <button class="numpad-btn" data-digit="1">1<sub>&nbsp;</sub></button>
-        <button class="numpad-btn" data-digit="2">2<sub>ABC</sub></button>
-        <button class="numpad-btn" data-digit="3">3<sub>DEF</sub></button>
-        <button class="numpad-btn" data-digit="4">4<sub>GHI</sub></button>
-        <button class="numpad-btn" data-digit="5">5<sub>JKL</sub></button>
-        <button class="numpad-btn" data-digit="6">6<sub>MNO</sub></button>
-        <button class="numpad-btn" data-digit="7">7<sub>PQRS</sub></button>
-        <button class="numpad-btn" data-digit="8">8<sub>TUV</sub></button>
-        <button class="numpad-btn" data-digit="9">9<sub>WXYZ</sub></button>
-        <button class="numpad-btn special" data-digit="*">*<sub>&nbsp;</sub></button>
-        <button class="numpad-btn" data-digit="0">0<sub>+</sub></button>
-        <button class="numpad-btn special backsp" id="numpad-backspace">&#x232B;<sub>&nbsp;</sub></button>
-      </div>
-
-      <!-- Botones Llamar / Colgar -->
-      <div class="manual-call-btns">
-        <button class="xbtn btn-dial" id="btn-manual-dial">
-          &#x1F4DE; Llamar
-        </button>
-        <button class="xbtn btn-hangup" id="btn-manual-hangup" disabled>
-          &#x1F534; Colgar
-        </button>
-      </div>
-
-      <!-- Log -->
-      <div class="manual-log" id="manual-log"></div>
-    </div>
-
-    <div class="ivr-scroll">
 
       <!-- ADB -->
-      <div class="fld">
-        <label class="flbl">Dispositivo ADB</label>
+      <div class="cfg-section">
+        <div class="cfg-sec-title">📱 Dispositivo ADB</div>
         <div class="frow">
           <select class="fsel" id="ivr-device"><option value="">— Seleccionar —</option></select>
-          <button class="xbtn xg" id="ivr-refresh-devices" title="Refrescar">&#x1F504;</button>
+          <button class="xbtn xg" id="ivr-refresh-devices" style="padding:5px 7px" title="Refrescar">🔄</button>
         </div>
-        <div class="frow" style="gap:5px;margin-top:3px">
+        <div class="adb-row">
           <span class="dot" id="adb-status-dot"></span>
-          <span id="adb-status-txt" style="font-size:10px;color:#64748b">Sin dispositivo seleccionado</span>
+          <span id="adb-status-txt">Sin dispositivo</span>
         </div>
       </div>
 
-      <!-- Microfono -->
-      <div class="fld">
-        <label class="flbl">Microfono (entrada)</label>
+      <!-- Audio entrada -->
+      <div class="cfg-section">
+        <div class="cfg-sec-title cyan">🎤 Audio Entrada (Micrófono)</div>
         <div class="frow">
-          <select class="fsel" id="ivr-audio-device"><option value="">&#x1F5A5; Predeterminado</option></select>
-          <button class="xbtn xg" id="ivr-refresh-audio" title="Refrescar">&#x1F504;</button>
-          <button class="xbtn xa" id="btn-test-input" style="padding:5px 8px" title="Probar 3s">&#x1F3A4; Probar</button>
+          <select class="fsel" id="ivr-audio-device"><option value="">🖥️ Predeterminado</option></select>
+          <button class="xbtn xg" id="ivr-refresh-audio" style="padding:5px 7px" title="Refrescar">🔄</button>
+          <button class="xbtn xa" id="btn-test-input" style="padding:5px 7px;font-size:11px">🎤 Test</button>
         </div>
-        <span class="flbl" style="text-transform:none;letter-spacing:0;color:#475569">Selecciona el mic que escucha el telefono</span>
+        <div class="fsub">Mic que escucha el teléfono</div>
+        <!-- Nivel de prueba (oculto hasta probar) -->
+        <div id="input-level-wrap" style="display:none;margin-top:4px">
+          <div style="height:5px;background:rgba(255,255,255,0.07);border-radius:3px;overflow:hidden">
+            <div id="input-level-bar" style="height:100%;width:0%;background:#22d3ee;transition:width .1s"></div>
+          </div>
+          <div id="input-level-txt" style="font-size:10px;color:#64748b;margin-top:2px"></div>
+        </div>
+
+        <!-- Audio salida -->
+        <div class="cfg-sec-title cyan" style="margin-top:6px">🔊 Audio Salida (Altavoz)</div>
+        <div class="frow">
+          <select class="fsel" id="ivr-output-device"><option value="">🔊 Predeterminado</option></select>
+          <button class="xbtn xa" id="btn-test-output" style="padding:5px 7px;font-size:11px">🔊 Test</button>
+        </div>
+        <div class="fsub">Donde se reproducen los audios IVR</div>
       </div>
 
-      <!-- Salida de audio (altavoz) -->
-      <div class="fld">
-        <label class="flbl">&#x1F508; Altavoz (salida)</label>
-        <div class="frow">
-          <select class="fsel" id="ivr-output-device"><option value="">&#x1F508; Predeterminado del sistema</option></select>
-          <button class="xbtn xa" id="btn-test-output" style="padding:5px 8px" title="Reproducir pitido">&#x1F508; Probar</button>
+      <!-- Modo de llamada -->
+      <div class="cfg-section">
+        <div class="cfg-sec-title">📡 Modo de llamada</div>
+        <div class="call-mode-btns">
+          <button class="call-mode-btn active" data-mode="ivr">🤖 IVR</button>
+          <button class="call-mode-btn bridge" data-mode="bridge">🎧 Puente</button>
+          <button class="call-mode-btn combo"  data-mode="ivr_bridge">🔀 IVR+Puente</button>
         </div>
-        <span class="flbl" style="text-transform:none;letter-spacing:0;color:#475569">Donde se reproducen los audios IVR</span>
+        <div class="fsub" id="call-mode-desc">IVR automático: reproduce audios y detecta DTMF</div>
       </div>
 
-      <!-- Excel -->
-      <div class="fld">
-        <label class="flbl">Lista de numeros</label>
-        <div class="frow">
-          <label class="xbtn xg" for="ivr-excel-input">&#x1F4C2; Excel</label>
+      <!-- Config IVR (visible en modos IVR e IVR+Puente) -->
+      <div class="cfg-section mode-section visible" id="sec-ivr-config">
+        <div class="cfg-sec-title">🎛️ Configuración IVR</div>
+
+        <div class="fld">
+          <label class="flbl">🎙️ Bienvenida / Saludo</label>
+          <div class="frow">
+            <label class="xbtn xg" for="ivr-audio-welcome-input" style="padding:4px 8px;font-size:11px">🎵</label>
+            <input type="file" id="ivr-audio-welcome-input" accept="audio/*,video/*" hidden />
+            <span class="fname" id="ivr-audio-welcome-name">Sin archivo</span>
+          </div>
+          <div class="fsub">Se reproduce al contestar</div>
+        </div>
+
+        <div class="fld">
+          <label class="flbl">📋 Menú IVR</label>
+          <div class="frow">
+            <label class="xbtn xg" for="ivr-audio-menu-input" style="padding:4px 8px;font-size:11px">🎵</label>
+            <input type="file" id="ivr-audio-menu-input" accept="audio/*,video/*" hidden />
+            <span class="fname" id="ivr-audio-menu-name">Sin archivo</span>
+          </div>
+          <div class="fsub">Se repite N veces con las opciones</div>
+        </div>
+
+        <div class="fld">
+          <label class="flbl">🔕 Sin respuesta</label>
+          <div class="frow">
+            <label class="xbtn xg" for="ivr-audio-notone-input" style="padding:4px 8px;font-size:11px">🎵</label>
+            <input type="file" id="ivr-audio-notone-input" accept="audio/*,video/*" hidden />
+            <span class="fname" id="ivr-audio-notone-name">Sin archivo (opcional)</span>
+          </div>
+        </div>
+
+        <!-- Opciones IVR -->
+        <div class="fld">
+          <div class="frow" style="justify-content:space-between">
+            <label class="flbl">Opciones IVR</label>
+            <button class="xbtn xa" id="ivr-add-option" style="padding:3px 7px;font-size:10px">+ Opción</button>
+          </div>
+          <div class="opt-list" id="ivr-options-list"></div>
+        </div>
+
+        <!-- Timers -->
+        <div class="frow" style="gap:6px">
+          <div class="fld" style="flex:1">
+            <label class="flbl">Delay (s)</label>
+            <input class="finp" type="number" id="ivr-delay" value="5" min="1" max="300" />
+          </div>
+          <div class="fld" style="flex:1">
+            <label class="flbl">Timeout (s)</label>
+            <input class="finp" type="number" id="ivr-tone-timeout" value="10" min="3" max="60" />
+          </div>
+          <div class="fld" style="flex:1">
+            <label class="flbl">Rep. menú</label>
+            <input class="finp" type="number" id="ivr-menu-repeats" value="2" min="1" max="10" />
+          </div>
+        </div>
+      </div>
+
+      <!-- Config Puente (visible en modos Bridge e IVR+Puente) -->
+      <div class="cfg-section mode-section" id="sec-bridge-config">
+        <div class="cfg-sec-title cyan">🎧 Configuración Puente de Audio</div>
+
+        <div class="fld">
+          <label class="flbl">📥 Entrada del Teléfono (PC ←  Phone)</label>
+          <select class="fsel" id="bridge-phone-in"><option value="">🎤 Sin seleccionar</option></select>
+          <div class="fsub">Interfaz que recibe el audio del destinatario</div>
+        </div>
+        <div class="fld">
+          <label class="flbl">📤 Salida al Teléfono (PC →  Phone)</label>
+          <select class="fsel" id="bridge-phone-out"><option value="">🔊 Sin seleccionar</option></select>
+          <div class="fsub">Interfaz que envía tu voz al destinatario</div>
+        </div>
+        <div class="fld">
+          <label class="flbl">🎙️ Micrófono Agente (PC)</label>
+          <select class="fsel" id="bridge-pc-mic"><option value="">🖥️ Predeterminado</option></select>
+        </div>
+        <div class="fld">
+          <label class="flbl">🎧 Auriculares Agente (PC)</label>
+          <select class="fsel" id="bridge-pc-spk"><option value="">🔊 Predeterminado</option></select>
+        </div>
+        <!-- Trigger digit para IVR+Puente -->
+        <div class="fld" id="bridge-trigger-wrap" style="display:none">
+          <label class="flbl">🔀 Dígito que activa el Puente</label>
+          <div class="bridge-trigger-row">
+            <input class="finp" type="text" id="bridge-trigger-digit" value="0" maxlength="1" style="width:45px;text-align:center;font-size:16px;font-weight:700;font-family:'JetBrains Mono',monospace" />
+            <span class="fsub">Presionar este dígito activa el puente</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Grabación -->
+      <div class="cfg-section">
+        <div class="cfg-sec-title pink">🔴 Grabación de llamadas</div>
+        <div class="frow" style="justify-content:space-between;align-items:center">
+          <span class="fsub">WAV 8kHz mono (~1MB/min) → recordings/</span>
+          <label class="toggle rec">
+            <input type="checkbox" id="ivr-record-calls" />
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+      </div>
+
+      <!-- WhatsApp -->
+      <div class="cfg-section">
+        <div class="cfg-sec-title wa">💬 Notif. WhatsApp</div>
+        <div class="frow" style="justify-content:space-between;align-items:center;margin-bottom:4px">
+          <span class="fsub">Enviar notificaciones al terminar</span>
+          <label class="toggle wa">
+            <input type="checkbox" id="wa-enabled" />
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+        <input class="finp" type="text" id="wa-contact" placeholder="Grupo o +57300..." style="font-size:11px;margin-bottom:3px" />
+        <input class="finp" type="text" id="wa-backup"  placeholder="Número respaldo (opcional)" style="font-size:11px;margin-bottom:4px" />
+        <div class="frow" style="gap:5px">
+          <button class="xbtn" id="wa-open-browser"
+            style="background:linear-gradient(135deg,#25d366,#128c7e);color:#fff;flex:1;justify-content:center;font-size:11px">
+            🌐 Abrir WhatsApp
+          </button>
+          <button class="xbtn xr" id="wa-close-browser" style="padding:5px 7px;font-size:11px">✕</button>
+        </div>
+        <div class="adb-row" style="margin-top:4px">
+          <span class="dot" id="wa-status-dot"></span>
+          <span id="wa-status-txt" style="font-size:10px">Navegador cerrado</span>
+          <span id="wa-queue-badge" hidden
+            style="background:rgba(37,211,102,.18);color:#25d366;border-radius:4px;font-size:9px;padding:1px 5px"></span>
+        </div>
+      </div>
+
+    </div><!-- /cfg-scroll -->
+  </div><!-- /cfg-panel -->
+
+
+  <!-- ══════════════ PANEL DERECHO — MARCACIÓN ══════════════ -->
+  <div class="main-panel">
+
+    <!-- Tabs Automática / Manual -->
+    <div class="main-tabs">
+      <button class="main-tab active" id="tab-auto"   onclick="switchMainTab('auto')">📋 Campaña Automática</button>
+      <button class="main-tab manual" id="tab-manual" onclick="switchMainTab('manual')">📞 Marcación Manual</button>
+    </div>
+
+    <!-- ───────────── TAB: AUTOMÁTICA ───────────── -->
+    <div class="tab-content active" id="tc-auto">
+
+      <!-- Controles de lanzamiento -->
+      <div class="auto-top">
+        <div class="frow" style="gap:6px;flex-wrap:wrap">
+          <!-- Cargar Excel -->
+          <label class="xbtn xg" for="ivr-excel-input" style="cursor:pointer">📂 Cargar Excel</label>
           <input type="file" id="ivr-excel-input" accept=".xlsx,.xls" hidden />
           <span class="fname" id="ivr-excel-name">Sin archivo</span>
+          <span class="fbadge" id="ivr-numbers-badge" hidden><span id="ivr-numbers-count"></span></span>
         </div>
-        <span class="fbadge" id="ivr-numbers-badge" hidden><span id="ivr-numbers-count"></span></span>
-      </div>
-
-      <!-- Audio Bienvenida -->
-      <div class="fld">
-        <label class="flbl">&#x1F399;&#xFE0F; Bienvenida / Saludo</label>
-        <div class="frow">
-          <label class="xbtn xg" for="ivr-audio-welcome-input">&#x1F3B5;</label>
-          <input type="file" id="ivr-audio-welcome-input" accept="audio/*,video/*" hidden />
-          <span class="fname" id="ivr-audio-welcome-name">Sin archivo</span>
-        </div>
-        <span class="flbl" style="text-transform:none;letter-spacing:0;color:#475569">Se reproduce una sola vez al contestar</span>
-      </div>
-
-      <!-- Audio Menu IVR -->
-      <div class="fld">
-        <label class="flbl">&#x1F4CB; Men&#xFA; IVR</label>
-        <div class="frow">
-          <label class="xbtn xg" for="ivr-audio-menu-input">&#x1F3B5;</label>
-          <input type="file" id="ivr-audio-menu-input" accept="audio/*,video/*" hidden />
-          <span class="fname" id="ivr-audio-menu-name">Sin archivo</span>
-        </div>
-        <span class="flbl" style="text-transform:none;letter-spacing:0;color:#475569">Se repite N veces presentando las opciones</span>
-      </div>
-
-      <!-- Audio Sin Tono -->
-      <div class="fld">
-        <label class="flbl">&#x1F515; Audio sin respuesta</label>
-        <div class="frow">
-          <label class="xbtn xg" for="ivr-audio-notone-input">&#x1F3B5;</label>
-          <input type="file" id="ivr-audio-notone-input" accept="audio/*,video/*" hidden />
-          <span class="fname" id="ivr-audio-notone-name">Sin archivo (opcional)</span>
-        </div>
-        <span class="flbl" style="text-transform:none;letter-spacing:0;color:#475569">Se reproduce si el cliente no presion&#xF3; nada</span>
-      </div>
-
-      <!-- Opciones IVR -->
-      <div class="fld">
-        <div class="frow" style="justify-content:space-between;margin-bottom:4px">
-          <label class="flbl">Opciones IVR</label>
-          <button class="xbtn xa" id="ivr-add-option" style="padding:3px 8px">+ Opcion</button>
-        </div>
-        <div class="opt-list" id="ivr-options-list"></div>
-      </div>
-
-      <!-- Tiempos + Repeticiones -->
-      <div class="frow" style="gap:8px">
-        <div class="fld" style="flex:1">
-          <label class="flbl">Delay (s)</label>
-          <input class="finp" type="number" id="ivr-delay" value="5" min="1" max="300" />
-        </div>
-        <div class="fld" style="flex:1">
-          <label class="flbl">Espera tono (s)</label>
-          <input class="finp" type="number" id="ivr-tone-timeout" value="10" min="3" max="60" />
-        </div>
-        <div class="fld" style="flex:1">
-          <label class="flbl">Rep. men&#xFA;</label>
-          <input class="finp" type="number" id="ivr-menu-repeats" value="2" min="1" max="10" title="Veces que se repite el menú IVR si no hay respuesta" />
+        <div class="auto-launch-row">
+          <button class="xbtn xg" id="ivr-test-btn">▶ Probar</button>
+          <button class="xbtn xp" id="ivr-launch-btn" disabled>🚀 Lanzar</button>
+          <button class="xbtn xo" id="ivr-pause-btn"  disabled>⏸ Pausar</button>
+          <button class="xbtn xr" id="ivr-stop-btn"   disabled>⏹ Detener</button>
+          <a class="xbtn xg" id="ivr-download-btn" href="/ivr/results" download style="display:none">⬇ CSV</a>
         </div>
       </div>
 
-      <!-- Grabacion de llamadas -->
-      <div style="border-top:1px solid rgba(255,255,255,0.07);margin:8px 0 4px;"></div>
-      <div class="fld">
-        <div class="frow" style="justify-content:space-between;align-items:center">
-          <label class="flbl" style="color:#f472b6;font-size:11px">&#x1F534; Grabar llamadas</label>
-          <label class="wa-toggle" title="Grabar audio de llamadas contestadas">
-            <input type="checkbox" id="ivr-record-calls" />
-            <span class="wa-slider" style=""></span>
-          </label>
-        </div>
-        <span class="flbl" style="text-transform:none;letter-spacing:0;color:#475569">WAV 8kHz mono (~1 MB/min) &rarr; carpeta recordings/</span>
+      <!-- Status bar -->
+      <div class="statbar">
+        <span class="sval" id="ivr-stat-processed">0</span>
+        <span class="slbl">/<span id="ivr-stat-total">0</span> llamadas</span>
+        <div class="spbar"><div class="spbar-fill" id="ivr-progress-bar"></div></div>
+        <span class="sstatus" id="ivr-campaign-status">Inactivo</span>
+        <span id="ivr-current-call" hidden style="color:#22d3ee;font-weight:700;font-size:12px">
+          📞 <span id="ivr-call-number"></span>
+        </span>
       </div>
 
-      <!-- ── NOTIFICACIONES WHATSAPP ── -->
-      <div style="border-top:1px solid rgba(255,255,255,0.07);margin:8px 0 4px;"></div>
-      <div class="fld" id="wa-section">
-
-        <!-- Cabecera con toggle -->
-        <div class="frow" style="justify-content:space-between;align-items:center;margin-bottom:4px">
-          <label class="flbl" style="color:#25d366;font-size:11px">&#x1F4AC; Notif. WhatsApp</label>
-          <label class="wa-toggle" id="wa-toggle-wrap" title="Activar/desactivar notificaciones">
-            <input type="checkbox" id="wa-enabled" />
-            <span class="wa-slider"></span>
-          </label>
-        </div>
-
-        <!-- Campos (siempre visibles para poder configurar) -->
-        <div id="wa-fields">
-          <div class="fld" style="margin-bottom:4px">
-            <label class="flbl" style="font-size:9px">Grupo o número destino</label>
-            <input class="finp" type="text" id="wa-contact"
-                   placeholder="Grupo IVR o +57300..." style="width:100%;box-sizing:border-box" />
-          </div>
-          <div class="fld" style="margin-bottom:6px">
-            <label class="flbl" style="font-size:9px">Número respaldo (opcional)</label>
-            <input class="finp" type="text" id="wa-backup"
-                   placeholder="+57300..." style="width:100%;box-sizing:border-box" />
-          </div>
-
-          <!-- Botón abrir Chrome + cerrar -->
-          <div class="frow" style="gap:5px">
-            <button class="xbtn" id="wa-open-browser"
-                    style="background:linear-gradient(135deg,#25d366,#128c7e);color:#fff;flex:1;justify-content:center;font-size:11px">
-              &#x1F310; Abrir WhatsApp
-            </button>
-            <button class="xbtn xr" id="wa-close-browser"
-                    style="padding:5px 8px;font-size:11px" title="Cerrar navegador">&#x2715;</button>
-          </div>
-
-          <!-- Estado del browser -->
-          <div class="frow" style="gap:6px;margin-top:5px;align-items:center">
-            <span class="dot" id="wa-status-dot"></span>
-            <span id="wa-status-txt" style="font-size:11px;color:#64748b">Navegador cerrado</span>
-            <span id="wa-queue-badge" hidden
-                  style="background:rgba(37,211,102,.18);color:#25d366;border-radius:4px;font-size:10px;padding:1px 6px"></span>
-          </div>
-        </div><!-- /wa-fields -->
-
-      </div><!-- /wa-section -->
-
-    </div><!-- /scroll -->
-
-    <div class="ivr-footer">
-      <button class="xbtn xg xbtn" id="ivr-test-btn">&#x25B6; Probar</button>
-      <button class="xbtn xp xbtn" id="ivr-launch-btn" disabled>&#x1F680; Lanzar</button>
-      <button class="xbtn xr xbtn" id="ivr-stop-btn" disabled>&#x23F9; Detener</button>
-    </div>
-
-  </div><!-- /left -->
-
-  <!-- ── COLUMNA DERECHA ── -->
-  <div class="ivr-right">
-
-    <!-- Status bar -->
-    <div class="ivr-statbar">
-      <span class="sval" id="ivr-stat-processed">0</span>
-      <span class="slbl">/<span id="ivr-stat-total">0</span> llamadas</span>
-      <div class="spbar">
-        <div class="spbar-fill" id="ivr-progress-bar"></div>
-      </div>
-      <span class="sstatus" id="ivr-campaign-status">Inactivo</span>
-      <span id="ivr-current-call" hidden style="color:#22d3ee;font-weight:700">
-        &#x1F4DE; <span id="ivr-call-number"></span>
-      </span>
-      <a class="xbtn xg" id="ivr-download-btn" href="/ivr/results" download style="display:none">&#x2B07; CSV</a>
-    </div>
-
-    <!-- Cuerpo -->
-    <div class="ivr-body">
-
-      <!-- Cola -->
+      <!-- Cola de llamadas -->
       <div class="queue-panel">
         <div class="panel-hdr">
-          <span>&#x1F4CB; Cola de llamadas</span>
+          <span>📋 Cola de llamadas</span>
         </div>
         <div class="queue-scroll">
           <table class="queue-table" id="ivr-queue-table">
-            <thead><tr><th>#</th><th>Numero</th><th>Estado</th><th>Tono</th></tr></thead>
+            <thead><tr><th>#</th><th>Número</th><th>Estado</th><th>Tono</th></tr></thead>
             <tbody id="ivr-queue-tbody"></tbody>
           </table>
         </div>
       </div>
 
-      <!-- Visualizador de audio en tiempo real -->
-      <div class="viz-panel" id="viz-panel">
-        <div class="viz-row">
-          <span class="viz-label in">&#x1F3A4;&nbsp;Entrada</span>
-          <canvas class="viz-canvas" id="viz-canvas-in"></canvas>
-          <span class="viz-db" id="viz-db-in">&mdash;</span>
+      <!-- Zona compartida (viz + log) -->
+      <div class="shared-bottom">
+        <div class="viz-panel">
+          <div class="viz-row">
+            <span class="viz-lbl in">🎤 Entrada</span>
+            <canvas class="viz-canvas" id="viz-canvas-in"></canvas>
+            <span class="viz-db" id="viz-db-in">&mdash;</span>
+          </div>
+          <div class="viz-row">
+            <span class="viz-lbl out">🔊 Salida</span>
+            <canvas class="viz-canvas" id="viz-canvas-out"></canvas>
+            <span class="viz-db" id="viz-db-out">&mdash;</span>
+          </div>
         </div>
-        <div class="viz-row">
-          <span class="viz-label out">&#x1F50A;&nbsp;Salida</span>
-          <canvas class="viz-canvas" id="viz-canvas-out"></canvas>
-          <span class="viz-db" id="viz-db-out">&mdash;</span>
+        <div class="log-panel">
+          <div class="panel-hdr">
+            <span>🖥 Log en tiempo real</span>
+            <button class="xbtn xg" id="ivr-clear-log" style="padding:2px 8px;font-size:11px">Limpiar</button>
+          </div>
+          <div id="ivr-log"></div>
         </div>
       </div>
 
-      <!-- Log -->
-      <div class="log-panel">
-        <div class="panel-hdr">
-          <span>&#x1F5A5; Log en tiempo real</span>
-          <button class="xbtn xg" id="ivr-clear-log" style="padding:2px 8px;font-size:11px">Limpiar</button>
+    </div><!-- /tc-auto -->
+
+
+    <!-- ───────────── TAB: MANUAL ───────────── -->
+    <div class="tab-content" id="tc-manual">
+
+      <!-- Estado + numpad + log -->
+      <div class="manual-top">
+
+        <!-- Columna izquierda: numpad -->
+        <div class="dial-col">
+          <!-- Estado -->
+          <div class="manual-state-bar">
+            <span class="msdot idle" id="manual-dot"></span>
+            <span class="ms-lbl" id="manual-state-lbl">Inactivo</span>
+            <span class="ms-num" id="manual-state-num" hidden></span>
+          </div>
+          <!-- Input número -->
+          <div class="num-wrap">
+            <input class="num-input" type="tel" id="manual-number"
+                   placeholder="Número" maxlength="20" inputmode="numeric" autocomplete="tel" />
+            <button class="num-clear" id="manual-num-clear" title="Borrar">&times;</button>
+          </div>
+          <!-- Numpad -->
+          <div class="numpad" id="numpad">
+            <button class="np-btn" data-digit="1">1<sub>&nbsp;</sub></button>
+            <button class="np-btn" data-digit="2">2<sub>ABC</sub></button>
+            <button class="np-btn" data-digit="3">3<sub>DEF</sub></button>
+            <button class="np-btn" data-digit="4">4<sub>GHI</sub></button>
+            <button class="np-btn" data-digit="5">5<sub>JKL</sub></button>
+            <button class="np-btn" data-digit="6">6<sub>MNO</sub></button>
+            <button class="np-btn" data-digit="7">7<sub>PQRS</sub></button>
+            <button class="np-btn" data-digit="8">8<sub>TUV</sub></button>
+            <button class="np-btn" data-digit="9">9<sub>WXYZ</sub></button>
+            <button class="np-btn sp" data-digit="*">*<sub>&nbsp;</sub></button>
+            <button class="np-btn" data-digit="0">0<sub>+</sub></button>
+            <button class="np-btn sp bk" id="numpad-backspace">&#x232B;<sub>&nbsp;</sub></button>
+          </div>
+          <!-- Botones llamar/colgar -->
+          <div class="dial-btns">
+            <button class="xbtn btn-dial"   id="btn-manual-dial">📞 Llamar</button>
+            <button class="xbtn btn-hangup" id="btn-manual-hangup" disabled>🔴 Colgar</button>
+          </div>
         </div>
-        <div id="ivr-log"></div>
+
+        <!-- Columna derecha: log manual -->
+        <div class="manual-log-col">
+          <div style="font-size:10px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:.07em">Log de llamada</div>
+          <div class="manual-log" id="manual-log"></div>
+        </div>
+
+      </div><!-- /manual-top -->
+
+      <!-- Zona compartida (viz + log) -->
+      <div class="shared-bottom">
+        <div class="viz-panel">
+          <div class="viz-row">
+            <span class="viz-lbl in">🎤 Entrada</span>
+            <canvas class="viz-canvas" id="viz-canvas-in-m"></canvas>
+            <span class="viz-db" id="viz-db-in-m">&mdash;</span>
+          </div>
+          <div class="viz-row">
+            <span class="viz-lbl out">🔊 Salida</span>
+            <canvas class="viz-canvas" id="viz-canvas-out-m"></canvas>
+            <span class="viz-db" id="viz-db-out-m">&mdash;</span>
+          </div>
+        </div>
+        <div class="log-panel">
+          <div class="panel-hdr">
+            <span>🖥 Log en tiempo real</span>
+            <button class="xbtn xg" id="ivr-clear-log-m" style="padding:2px 8px;font-size:11px">Limpiar</button>
+          </div>
+          <div id="ivr-log-m"></div>
+        </div>
       </div>
 
-    </div><!-- /body -->
+    </div><!-- /tc-manual -->
 
-  </div><!-- /right -->
+  </div><!-- /main-panel -->
 
 </div><!-- /root -->
 
@@ -834,11 +773,26 @@
 <div class="modal-bg" id="ivr-test-modal" hidden>
   <div class="modal-box">
     <h3>Prueba de sistema</h3>
-    <p>Numero de prueba:</p>
-    <input class="finp" type="tel" id="ivr-test-number" placeholder="Ej: 3001234567" style="width:100%;margin:10px 0;box-sizing:border-box" />
+    <p>Número de prueba:</p>
+    <input class="finp" type="tel" id="ivr-test-number" placeholder="Ej: 3001234567"
+           style="width:100%;margin:10px 0;box-sizing:border-box" />
     <div class="modal-acts">
       <button class="xbtn xg" id="ivr-test-cancel">Cancelar</button>
-      <button class="xbtn xp" id="ivr-test-confirm">&#x1F4DE; Llamar</button>
+      <button class="xbtn xp" id="ivr-test-confirm">📞 Llamar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Modal guardar plantilla -->
+<div class="modal-bg" id="tmpl-save-modal" hidden>
+  <div class="modal-box">
+    <h3>Guardar Plantilla</h3>
+    <p>La configuración actual se guardará. Los audios se copiarán al directorio de plantillas.</p>
+    <input class="finp" type="text" id="tmpl-save-name"
+           placeholder="Nombre de la plantilla" style="width:100%;margin:10px 0;box-sizing:border-box" />
+    <div class="modal-acts">
+      <button class="xbtn xg" id="tmpl-save-cancel">Cancelar</button>
+      <button class="xbtn xo" id="tmpl-save-confirm">💾 Guardar</button>
     </div>
   </div>
 </div>
@@ -849,6 +803,8 @@
   <button id="monitor-btn"><span class="monitor-btn-icon"></span><span class="monitor-btn-label"></span></button>
   <div id="rt-digit-bg"><div id="rt-digit-value"></div></div>
   <div id="rt-energy-fill"></div><div id="rt-seq-digits"></div><button id="rt-clear-btn"></button>
+  <!-- espejo de mic-dot2 y mic-txt2 para app.js -->
+  <span id="mic-dot2"></span><span id="mic-txt2"></span>
 </div>
 
 <script src="https://cdn.socket.io/4.8.1/socket.io.min.js"></script>

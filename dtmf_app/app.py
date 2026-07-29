@@ -39,12 +39,17 @@ from core.config import (
     ZCR_VOICE, RING_ON_MIN, RING_ON_MAX, RING_OFF_MIN,
     VOICE_SUSTAINED_MIN, ENERGY_THR_SIGNAL, ENERGY_SUSTAINED_MIN, MAX_RINGS,
     MONITOR_WINDOW_MS, MONITOR_HOP_MS, MONITOR_VIZ_HZ,
+    CALL_MODE_IVR, CALL_MODE_BRIDGE, CALL_MODE_IVR_BRIDGE,
+    BRIDGE_TRIGGER_DIGIT_DEFAULT, BRIDGE_BLOCK_MS, BRIDGE_GAIN_IN, BRIDGE_GAIN_OUT,
+    CALL_MONITOR_TIMEOUT_S,
 )
 from core.dtmf_engine import (
     get_bandpass_sos, bandpass_filter, amplify as _amplify_audio,
     detect_dtmf_frame, analyze_dtmf, build_chart, goertzel_batch,
     resample_audio as _resample_audio,
 )
+from core.audio_bridge import AudioBridge
+from core.templates import template_manager, TMPL_AUDIO
 
 # Alias para retrocompatibilidad con el resto del archivo
 _DTMF_DIGIT_FREQS = DTMF_DIGIT_FREQS
@@ -2764,6 +2769,181 @@ def manual_status():
             "state":  _manual_call.state,
             "number": _manual_call.number,
         })
+
+
+# ══════════════════════════════════════════════════════════════
+#  PUENTE DE AUDIO  —  /ivr/bridge/*
+# ══════════════════════════════════════════════════════════════
+
+_active_bridge: "AudioBridge | None" = None
+_bridge_lock    = threading.Lock()
+
+
+def _bridge_on_status(msg: str, level: str):
+    """Callback de estado del puente → emite a la UI vía Socket.IO."""
+    print(f"[Bridge] {msg}")
+    socketio.emit("bridge_log", {"msg": msg, "level": level, "ts": time.time()})
+
+
+@app.route("/ivr/bridge/start", methods=["POST"])
+def bridge_start():
+    """
+    Inicia el puente de audio bidireccional.
+    Body JSON:
+      phone_in_idx    int | null  — entrada que recibe audio del teléfono
+      phone_out_idx   int | null  — salida que envía audio al teléfono
+      pc_speaker_idx  int | null  — auriculares del agente (null = default)
+      pc_mic_idx      int | null  — micrófono del agente   (null = default)
+      block_ms        int         — tamaño de bloque en ms (default 40)
+      gain_in         float       — ganancia teléfono→auriculares
+      gain_out        float       — ganancia mic→teléfono
+    """
+    global _active_bridge
+    with _bridge_lock:
+        if _active_bridge and _active_bridge.is_running:
+            return jsonify({"ok": False, "error": "Ya hay un puente activo"}), 409
+
+    data = request.get_json(force=True) or {}
+
+    phone_in   = data.get("phone_in_idx")
+    phone_out  = data.get("phone_out_idx")
+    pc_spk     = data.get("pc_speaker_idx")
+    pc_mic     = data.get("pc_mic_idx")
+    block_ms   = int(data.get("block_ms",  BRIDGE_BLOCK_MS))
+    gain_in    = float(data.get("gain_in",  BRIDGE_GAIN_IN))
+    gain_out   = float(data.get("gain_out", BRIDGE_GAIN_OUT))
+
+    if phone_in is None and phone_out is None:
+        return jsonify({
+            "ok":    False,
+            "error": "Debes seleccionar al menos la interfaz de audio del teléfono.",
+        }), 400
+
+    with _bridge_lock:
+        _active_bridge = AudioBridge(
+            phone_in_idx   = int(phone_in)  if phone_in  is not None else None,
+            phone_out_idx  = int(phone_out) if phone_out is not None else None,
+            pc_speaker_idx = int(pc_spk)    if pc_spk    is not None else None,
+            pc_mic_idx     = int(pc_mic)    if pc_mic    is not None else None,
+            block_ms       = block_ms,
+            gain_in        = gain_in,
+            gain_out       = gain_out,
+            on_status      = _bridge_on_status,
+        )
+        _active_bridge.start()
+
+    socketio.emit("bridge_state", {"state": "ACTIVE"})
+    return jsonify({"ok": True, "msg": "Puente de audio iniciado"})
+
+
+@app.route("/ivr/bridge/stop", methods=["POST"])
+def bridge_stop():
+    """Detiene el puente de audio activo."""
+    global _active_bridge
+    with _bridge_lock:
+        if not _active_bridge or not _active_bridge.is_running:
+            return jsonify({"ok": False, "error": "No hay puente activo"}), 404
+        _active_bridge.stop()
+        _active_bridge.join(timeout=3.0)
+        _active_bridge = None
+
+    socketio.emit("bridge_state", {"state": "IDLE"})
+    return jsonify({"ok": True, "msg": "Puente detenido"})
+
+
+@app.route("/ivr/bridge/status")
+def bridge_status():
+    """Estado del puente de audio."""
+    with _bridge_lock:
+        if not _active_bridge:
+            return jsonify({"running": False, "error": None})
+        return jsonify({
+            "running": _active_bridge.is_running,
+            "error":   _active_bridge.error,
+        })
+
+
+# ══════════════════════════════════════════════════════════════
+#  PLANTILLAS  —  /ivr/templates/*
+# ══════════════════════════════════════════════════════════════
+
+@app.route("/ivr/templates", methods=["GET"])
+def templates_list():
+    """Lista todas las plantillas guardadas."""
+    try:
+        items = template_manager.list_all()
+        return jsonify({"ok": True, "templates": items})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/ivr/templates", methods=["POST"])
+def templates_save():
+    """
+    Guarda una plantilla nueva o actualiza una existente.
+    Body JSON: { name: str, ...config }
+    Los audios referenciados se copian al directorio templates/audio/.
+    """
+    data = request.get_json(force=True) or {}
+    name = str(data.pop("name", "")).strip()
+    if not name:
+        return jsonify({"ok": False, "error": "El nombre de la plantilla es obligatorio"}), 400
+    try:
+        slug = template_manager.save(name, data)
+        return jsonify({"ok": True, "slug": slug, "name": name})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/ivr/templates/<slug>", methods=["GET"])
+def templates_load(slug):
+    """Carga una plantilla por slug."""
+    try:
+        data = template_manager.load(slug)
+        return jsonify({"ok": True, "template": data})
+    except FileNotFoundError:
+        return jsonify({"ok": False, "error": f"Plantilla '{slug}' no encontrada"}), 404
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/ivr/templates/<slug>", methods=["DELETE"])
+def templates_delete(slug):
+    """Elimina una plantilla y sus audios exclusivos."""
+    try:
+        deleted = template_manager.delete(slug)
+        if deleted:
+            return jsonify({"ok": True, "msg": f"Plantilla '{slug}' eliminada"})
+        return jsonify({"ok": False, "error": "Plantilla no encontrada"}), 404
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/ivr/templates/<slug>", methods=["PUT"])
+def templates_rename(slug):
+    """Renombra una plantilla. Body JSON: { name: str }"""
+    data     = request.get_json(force=True) or {}
+    new_name = str(data.get("name", "")).strip()
+    if not new_name:
+        return jsonify({"ok": False, "error": "Nuevo nombre obligatorio"}), 400
+    try:
+        new_slug = template_manager.rename(slug, new_name)
+        return jsonify({"ok": True, "slug": new_slug, "name": new_name})
+    except FileNotFoundError:
+        return jsonify({"ok": False, "error": f"Plantilla '{slug}' no encontrada"}), 404
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+# Servir audios de plantillas desde el directorio templates/audio/
+@app.route("/ivr/templates/audio/<filename>")
+def templates_audio_file(filename):
+    """Sirve un archivo de audio guardado en la plantilla."""
+    from flask import send_from_directory
+    safe = os.path.basename(filename)
+    if not os.path.isfile(os.path.join(TMPL_AUDIO, safe)):
+        return jsonify({"ok": False, "error": "Archivo no encontrado"}), 404
+    return send_from_directory(TMPL_AUDIO, safe)
 
 
 if __name__ == "__main__":

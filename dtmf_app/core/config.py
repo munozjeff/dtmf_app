@@ -130,3 +130,22 @@ TELECOM_LOGCAT_TAGS: list[str] = [
     "CallStateMachine",
 ]
 CALL_MONITOR_TIMEOUT_S: float = 90.0  # s sin eventos → asumir llamada perdida
+
+# ──────────────────────────────────────────────────────────────
+# Modos de llamada
+# ──────────────────────────────────────────────────────────────
+
+CALL_MODE_IVR:       str = "ivr"        # IVR clásico: audio pregrabado + DTMF
+CALL_MODE_BRIDGE:    str = "bridge"     # Puente directo: audio bidireccional desde que contesta
+CALL_MODE_IVR_BRIDGE:str = "ivr_bridge" # IVR hasta dígito trigger → luego activa puente
+
+# Dígito DTMF por defecto que activa el puente en modo ivr_bridge
+BRIDGE_TRIGGER_DIGIT_DEFAULT: str = "0"
+
+# ──────────────────────────────────────────────────────────────
+# Audio Bridge — Parámetros por defecto
+# ──────────────────────────────────────────────────────────────
+
+BRIDGE_BLOCK_MS: int    = 40    # ms — tamaño de bloque (latencia ≈ 2×BLOCK_MS)
+BRIDGE_GAIN_IN: float   = 1.0   # ganancia audio teléfono → auriculares
+BRIDGE_GAIN_OUT: float  = 1.0   # ganancia micrófono PC  → teléfono
