@@ -1245,7 +1245,7 @@ function _onBridgeState(state) {
     const sel=$h(selId); if(!sel)return;
     try{const r=await fetch('/ivr/devices'),d=await r.json(),prev=sel.value;
       sel.innerHTML='<option value="">— Seleccionar —</option>';
-      (d.devices||[]).forEach(dev=>{const o=document.createElement('option');o.value=dev.id;o.textContent=`${dev.id}  (${dev.model||dev.status})`;sel.appendChild(o);});
+      (d.devices||[]).forEach(devStr=>{const o=document.createElement('option');o.value=devStr;o.textContent=devStr;sel.appendChild(o);});
       if(prev)sel.value=prev;}catch{}
   }
   window.refreshDevicesFor=_refreshDevFor;
@@ -1254,8 +1254,8 @@ function _onBridgeState(state) {
     const sel=$h(selId); if(!sel)return;
     try{const r=await fetch('/ivr/audio_devices'),d=await r.json(),prev=sel.value;
       sel.innerHTML=`<option value="">${kind==='input'?'— Entrada —':'— Salida —'}</option>`;
-      (d.devices||[]).filter(dev=>kind==='input'?dev.max_input_channels>0:dev.max_output_channels>0)
-        .forEach(dev=>{const o=document.createElement('option');o.value=dev.index;o.textContent=`[${dev.index}] ${dev.name}`;sel.appendChild(o);});
+      const arr = kind === 'input' ? (d.inputs||[]) : (d.outputs||[]);
+      arr.forEach(dev=>{const o=document.createElement('option');o.value=dev.index;o.textContent=`[${dev.index}] ${dev.name}`;sel.appendChild(o);});
       if(prev)sel.value=prev;}catch{}
   }
 
