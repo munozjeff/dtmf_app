@@ -741,7 +741,70 @@ function _onBridgeState(state) {
     } catch(e) { addLog("❌ Error cargando plantillas: " + e.message, "err"); }
   }
 
-  // Cargar plantilla
+  // ─────────────────────────────────────────────────────────────
+  // Helpers para reconstruir opciones IVR desde plantilla
+  // ─────────────────────────────────────────────────────────────
+  function _rebuildIvrOptions(ivrOptions) {
+    const list = E("ivr-options-list"); if (!list) return;
+    list.innerHTML = "";          // limpiar opciones actuales
+    optCounter = 0;
+    if (!ivrOptions || typeof ivrOptions !== "object") return;
+
+    Object.entries(ivrOptions).forEach(([digit, val]) => {
+      const rid  = "opt-" + (++optCounter);
+      const desc = typeof val === "string" ? val : (val?.desc || "");
+      const byePath = typeof val === "object" ? (val?.audio_bye || null) : null;
+      const byeName  = byePath ? byePath.split(/[/\\]/).pop() : "Global (predeterminada)";
+
+      // Guardar ruta en el mapa de audios de opciones
+      if (byePath) optByePaths[rid] = byePath;
+
+      const row = document.createElement("div");
+      row.className = "opt-row"; row.dataset.rid = rid;
+      row.innerHTML = `
+        <div class="opt-row-top">
+          <input type="text" class="finp opt-digit" placeholder="1" maxlength="1"
+                 style="width:28px;text-align:center;flex-shrink:0;padding:4px" value="${digit}">
+          <input type="text" class="finp opt-desc" placeholder="Descripción"
+                 style="flex:1;padding:4px" value="${desc.replace(/"/g,'&quot;')}">
+          <button class="xbtn xr" style="padding:2px 7px">✕</button>
+        </div>
+        <div class="opt-row-bye">
+          <label>🎵 Despedida:</label>
+          <label class="xbtn xg" for="bye-${rid}" style="padding:2px 6px;font-size:10px">Audio</label>
+          <input type="file" id="bye-${rid}" class="opt-bye-input" accept="audio/*,video/*" hidden>
+          <span class="fname opt-bye-name">${byePath ? '📂 ' + byeName : 'Global (predeterminada)'}</span>
+        </div>`;
+      row.querySelector("button").addEventListener("click", () => { delete optByePaths[rid]; row.remove(); });
+      const fi = row.querySelector(".opt-bye-input");
+      fi.addEventListener("change", async e => {
+        const f = e.target.files[0]; if (!f) return;
+        const nm = row.querySelector(".opt-bye-name"); if (nm) nm.textContent = "⏳ " + f.name;
+        const fd = new FormData(); fd.append("file", f); fd.append("type", "bye_" + rid);
+        try {
+          const r2 = await fetch("/ivr/upload_audio", { method: "POST", body: fd });
+          const d2 = await r2.json();
+          if (d2.ok) { optByePaths[rid] = d2.path; if (nm) nm.textContent = "✅ " + f.name; }
+          else if (nm) nm.textContent = "❌ Error";
+        } catch { if (row.querySelector(".opt-bye-name")) row.querySelector(".opt-bye-name").textContent = "❌ Red"; }
+      });
+      list.appendChild(row);
+    });
+  }
+
+  // Helper: aplica un índice a un <select> si la opción ya existe
+  function _applySelIdx(selId, idx) {
+    if (idx == null) return;
+    const sel = E(selId); if (!sel) return;
+    const strIdx = String(idx);
+    if ([...sel.options].some(o => o.value === strIdx)) {
+      sel.value = strIdx;
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Cargar plantilla — aplica TODOS los campos al formulario
+  // ─────────────────────────────────────────────────────────────
   E("tmpl-load-btn")?.addEventListener("click", async () => {
     const slug = E("tmpl-select")?.value;
     if (!slug) { addLog("⚠️ Selecciona una plantilla primero.", "warn"); return; }
@@ -751,52 +814,82 @@ function _onBridgeState(state) {
       if (!d.ok) { addLog("❌ " + (d.error || "Error cargando"), "err"); return; }
       const t = d.template;
 
-      // Aplicar modo de llamada
+      // 1. Nombre de la plantilla en el campo
+      if (E("tmpl-name")) E("tmpl-name").value = t.name || "";
+
+      // 2. Modo de llamada
       if (t.call_mode) setCallMode(t.call_mode);
 
-      // Aplicar timers
-      if (t.delay_seconds  !== undefined && E("ivr-delay"))        E("ivr-delay").value = t.delay_seconds;
-      if (t.tone_timeout   !== undefined && E("ivr-tone-timeout")) E("ivr-tone-timeout").value = t.tone_timeout;
-      if (t.menu_repeats   !== undefined && E("ivr-menu-repeats")) E("ivr-menu-repeats").value = t.menu_repeats;
+      // 3. Timers
+      if (t.delay_seconds  != null && E("ivr-delay"))        E("ivr-delay").value        = t.delay_seconds;
+      if (t.tone_timeout   != null && E("ivr-tone-timeout")) E("ivr-tone-timeout").value = t.tone_timeout;
+      if (t.menu_repeats   != null && E("ivr-menu-repeats")) E("ivr-menu-repeats").value = t.menu_repeats;
 
-      // Grabación
-      if (t.record_calls !== undefined && E("ivr-record-calls")) E("ivr-record-calls").checked = t.record_calls;
+      // 4. Grabación
+      if (t.record_calls   != null && E("ivr-record-calls")) E("ivr-record-calls").checked = !!t.record_calls;
 
-      // Trigger digit
+      // 5. Trigger digit puente
       if (t.bridge_trigger_digit && E("bridge-trigger-digit"))
         E("bridge-trigger-digit").value = t.bridge_trigger_digit;
 
-      // Nombres de audios (solo info)
-      const showAudioName = (key, nameId) => {
+      // 6. Audios — mostrar nombre y restaurar ruta interna
+      const applyAudio = (key, nameId, pathKey) => {
         const path = t[key];
         if (path) {
           const fn = path.split(/[/\\]/).pop();
           const el = E(nameId); if (el) el.textContent = "📂 " + fn;
-          audioPaths[key === "audio_welcome" ? "welcome" : key === "audio_menu" ? "menu" : "no_tone"] = path;
+          audioPaths[pathKey] = path;
+        } else {
+          const el = E(nameId); if (el) el.textContent = "Sin archivo";
+          audioPaths[pathKey] = null;
         }
       };
-      showAudioName("audio_welcome", "ivr-audio-welcome-name");
-      showAudioName("audio_menu",    "ivr-audio-menu-name");
-      showAudioName("audio_no_tone", "ivr-audio-notone-name");
+      applyAudio("audio_welcome", "ivr-audio-welcome-name", "welcome");
+      applyAudio("audio_menu",    "ivr-audio-menu-name",    "menu");
+      applyAudio("audio_no_tone", "ivr-audio-notone-name",  "no_tone");
 
-      // WA config
-      if (t.wa_contact !== undefined && E("wa-contact")) E("wa-contact").value = t.wa_contact || "";
-      if (t.wa_backup  !== undefined && E("wa-backup"))  E("wa-backup").value  = t.wa_backup  || "";
-      if (t.wa_enabled !== undefined && E("wa-enabled")) E("wa-enabled").checked = !!t.wa_enabled;
+      // 7. Opciones IVR — reconstruir en el DOM
+      _rebuildIvrOptions(t.ivr_options);
 
-      const missingAudio = t._missing_audio;
-      if (missingAudio?.length) {
-        addLog("⚠️ Plantilla cargada (audios faltantes: " + missingAudio.join(", ") + ")", "warn");
+      // 8. Dispositivos de audio (los selectores ya están poblados por _loadAudioDevices)
+      //    Si aún no están listos, se aplican al finalizar la carga de dispositivos.
+      const applyDevices = () => {
+        _applySelIdx("ivr-audio-device",  t.audio_device_idx);
+        _applySelIdx("ivr-output-device", t.audio_output_device_idx);
+        _applySelIdx("bridge-phone-in",   t.bridge_phone_in_idx);
+        _applySelIdx("bridge-phone-out",  t.bridge_phone_out_idx);
+        _applySelIdx("bridge-pc-mic",     t.bridge_pc_mic_idx);
+        _applySelIdx("bridge-pc-spk",     t.bridge_pc_spk_idx);
+      };
+      const hasDevices = E("ivr-audio-device")?.options.length > 1;
+      if (hasDevices) {
+        applyDevices();
       } else {
-        addLog("✅ Plantilla '" + t.name + "' cargada", "ok");
+        // Esperar a que se carguen los dispositivos y luego aplicar
+        await _loadAudioDevices();
+        applyDevices();
       }
+
+      // 9. WA config
+      if (t.wa_contact != null && E("wa-contact")) E("wa-contact").value = t.wa_contact || "";
+      if (t.wa_backup  != null && E("wa-backup"))  E("wa-backup").value  = t.wa_backup  || "";
+      if (t.wa_enabled != null && E("wa-enabled")) E("wa-enabled").checked = !!t.wa_enabled;
+
+      const missing = t._missing_audio || [];
+      addLog(
+        "✅ Plantilla '" + t.name + "' aplicada" +
+        (missing.length ? " ⚠️ audios faltantes: " + missing.join(", ") : ""),
+        missing.length ? "warn" : "ok"
+      );
     } catch(e) { addLog("❌ Error de red: " + e.message, "err"); }
   });
 
-  // Guardar plantilla (modal)
+  // ─────────────────────────────────────────────────────────────
+  // Guardar plantilla — captura TODOS los campos del formulario
+  // ─────────────────────────────────────────────────────────────
   E("tmpl-save-btn")?.addEventListener("click", () => {
     const name = E("tmpl-name")?.value.trim() || "";
-    E("tmpl-save-name").value = name;
+    if (E("tmpl-save-name")) E("tmpl-save-name").value = name;
     E("tmpl-save-modal").hidden = false;
   });
   E("tmpl-save-cancel")?.addEventListener("click", () => { E("tmpl-save-modal").hidden = true; });
@@ -805,20 +898,41 @@ function _onBridgeState(state) {
     if (!name) { addLog("⚠️ El nombre de la plantilla es obligatorio.", "warn"); return; }
     E("tmpl-save-modal").hidden = true;
 
+    // Recopilar opciones IVR del DOM actual
+    const ivrOpts = {};
+    E("ivr-options-list")?.querySelectorAll(".opt-row").forEach(r => {
+      const digit = r.querySelector(".opt-digit")?.value?.trim();
+      const desc  = r.querySelector(".opt-desc")?.value?.trim();
+      const rid   = r.dataset.rid;
+      if (digit && desc) {
+        const byePath = rid && optByePaths[rid] ? optByePaths[rid] : null;
+        ivrOpts[digit] = byePath ? { desc, audio_bye: byePath } : desc;
+      }
+    });
+
     const payload = {
       name,
-      call_mode:           _callMode,
-      delay_seconds:       parseInt(E("ivr-delay")?.value) || 5,
-      tone_timeout:        parseInt(E("ivr-tone-timeout")?.value) || 10,
-      menu_repeats:        parseInt(E("ivr-menu-repeats")?.value) || 2,
-      record_calls:        E("ivr-record-calls")?.checked || false,
-      audio_welcome:       audioPaths.welcome,
-      audio_menu:          audioPaths.menu,
-      audio_no_tone:       audioPaths.no_tone,
-      bridge_trigger_digit: E("bridge-trigger-digit")?.value || "0",
-      wa_enabled:          E("wa-enabled")?.checked || false,
-      wa_contact:          E("wa-contact")?.value || "",
-      wa_backup:           E("wa-backup")?.value  || "",
+      call_mode:              _callMode,
+      delay_seconds:          parseInt(E("ivr-delay")?.value)        || 5,
+      tone_timeout:           parseInt(E("ivr-tone-timeout")?.value) || 10,
+      menu_repeats:           parseInt(E("ivr-menu-repeats")?.value) || 2,
+      record_calls:           E("ivr-record-calls")?.checked || false,
+      audio_welcome:          audioPaths.welcome  || null,
+      audio_menu:             audioPaths.menu     || null,
+      audio_no_tone:          audioPaths.no_tone  || null,
+      ivr_options:            ivrOpts,
+      bridge_trigger_digit:   E("bridge-trigger-digit")?.value || "0",
+      // Índices de dispositivos de audio
+      audio_device_idx:       _getSelIdx("ivr-audio-device"),
+      audio_output_device_idx:_getSelIdx("ivr-output-device"),
+      bridge_phone_in_idx:    _getSelIdx("bridge-phone-in"),
+      bridge_phone_out_idx:   _getSelIdx("bridge-phone-out"),
+      bridge_pc_mic_idx:      _getSelIdx("bridge-pc-mic"),
+      bridge_pc_spk_idx:      _getSelIdx("bridge-pc-spk"),
+      // WA
+      wa_enabled:             E("wa-enabled")?.checked || false,
+      wa_contact:             E("wa-contact")?.value  || "",
+      wa_backup:              E("wa-backup")?.value   || "",
     };
 
     try {
@@ -828,7 +942,7 @@ function _onBridgeState(state) {
       });
       const d = await r.json();
       if (d.ok) {
-        addLog("✅ Plantilla '" + name + "' guardada (slug: " + d.slug + ")", "ok");
+        addLog("✅ Plantilla '" + name + "' guardada", "ok");
         await _loadTemplates();
         const sel = E("tmpl-select"); if (sel) sel.value = d.slug;
         if (E("tmpl-name")) E("tmpl-name").value = name;
