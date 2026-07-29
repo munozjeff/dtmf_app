@@ -1243,7 +1243,7 @@ function _onBridgeState(state) {
 
   async function _refreshDevFor(selId){
     const sel=$h(selId); if(!sel)return;
-    try{const r=await fetch('/adb/devices'),d=await r.json(),prev=sel.value;
+    try{const r=await fetch('/ivr/devices'),d=await r.json(),prev=sel.value;
       sel.innerHTML='<option value="">— Seleccionar —</option>';
       (d.devices||[]).forEach(dev=>{const o=document.createElement('option');o.value=dev.id;o.textContent=`${dev.id}  (${dev.model||dev.status})`;sel.appendChild(o);});
       if(prev)sel.value=prev;}catch{}
@@ -1252,7 +1252,7 @@ function _onBridgeState(state) {
 
   async function _refreshAudFor(selId,kind){
     const sel=$h(selId); if(!sel)return;
-    try{const r=await fetch('/audio/devices'),d=await r.json(),prev=sel.value;
+    try{const r=await fetch('/ivr/audio_devices'),d=await r.json(),prev=sel.value;
       sel.innerHTML=`<option value="">${kind==='input'?'— Entrada —':'— Salida —'}</option>`;
       (d.devices||[]).filter(dev=>kind==='input'?dev.max_input_channels>0:dev.max_output_channels>0)
         .forEach(dev=>{const o=document.createElement('option');o.value=dev.index;o.textContent=`[${dev.index}] ${dev.name}`;sel.appendChild(o);});
