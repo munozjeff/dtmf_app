@@ -1059,3 +1059,217 @@ function _onBridgeState(state) {
   _waLoadConfig();
 
 })();
+
+
+// ═══════════════════════════════════════════════════════════════
+//  MULTI-SESSION MODULE
+// ═══════════════════════════════════════════════════════════════
+
+(function() {
+  'use strict';
+
+  const _sessions = {};
+  let   _probing  = false;
+  let   _probeDeviceId = null;
+  const $h = id => document.getElementById(id);
+  const fmtT = () => new Date().toLocaleTimeString('es',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+
+  const _origSwitch = window.switchMainTab;
+  window.switchMainTab = function(tab) {
+    _origSwitch(tab);
+    const btnS = $h('tab-sessions');
+    if (btnS) btnS.classList.toggle('active', tab === 'sessions');
+    const tc = $h('tc-sessions');
+    if (tc) tc.classList.toggle('active', tab === 'sessions');
+    if (tab === 'sessions') loadSessions();
+  };
+
+  window.loadSessions = async function() {
+    try {
+      const r = await fetch('/ivr/sessions');
+      const d = await r.json();
+      if (!d.ok) return;
+      d.sessions.forEach(s => { _sessions[s.session_id] = s; renderSessionCard(s); });
+      toggleEmpty();
+    } catch(e) { console.error('[Sessions]', e); }
+  };
+
+  function renderSessionCard(s) {
+    const grid = $h('sessions-grid');
+    if (!grid) return;
+    const emptyEl = $h('sessions-empty');
+    if (emptyEl) emptyEl.style.display = 'none';
+    let card = $h('scard-' + s.session_id);
+    if (!card) { card = document.createElement('div'); card.id = 'scard-' + s.session_id; grid.appendChild(card); }
+    const status = (s.status || 'IDLE').toLowerCase();
+    card.className = 'session-card ' + status;
+    const pct = s.total > 0 ? Math.round(s.processed / s.total * 100) : 0;
+    const audIn  = s.audio_in_idx  != null ? 'in:'+s.audio_in_idx  : '?';
+    const audOut = s.audio_out_idx != null ? 'out:'+s.audio_out_idx : '?';
+    const audWarn = s.audio_in_idx == null ? ' warn' : '';
+    card.innerHTML = `<div class="sc-head"><div class="sc-dot ${status}"></div><div class="sc-label">${s.label}</div><div class="sc-sid">${s.session_id}</div></div>
+<div class="sc-meta"><span class="sc-tag adb">📱 ${s.device_id||'—'}</span><span class="sc-tag aud${audWarn}">🎤 ${audIn} 🔊 ${audOut}</span><span class="sc-tag">${s.status}</span>${s.last_number?`<span class="sc-tag">📞 ${s.last_number}</span>`:''}</div>
+<div class="sc-progress"><div class="sc-progress-fill" style="width:${pct}%"></div></div>
+<div class="sc-progress-txt">${s.processed}/${s.total} (${pct}%)</div>
+<div class="sc-log" id="sclog-${s.session_id}"></div>
+<div class="sc-btns">${_cardBtns(s)}</div>`;
+  }
+
+  function _cardBtns(s) {
+    const sid=s.session_id, st=(s.status||'').toUpperCase(), b=[];
+    if(['IDLE','READY','DONE','ERROR'].includes(st)) b.push(`<button class="xbtn xp" onclick="sessionStart('${sid}')">🚀 Lanzar</button>`);
+    if(st==='RUNNING')  b.push(`<button class="xbtn xo" onclick="sessionPause('${sid}')">⏸ Pausar</button>`);
+    if(st==='PAUSED')   b.push(`<button class="xbtn xg" onclick="sessionResume('${sid}')">▶ Reanudar</button>`);
+    if(['RUNNING','PAUSED'].includes(st)) b.push(`<button class="xbtn xr" onclick="sessionStop('${sid}')">⏹ Detener</button>`);
+    if(!['RUNNING','PAUSED','PROBING'].includes(st)) b.push(`<button class="xbtn xr" onclick="sessionDelete('${sid}')">🗑 Eliminar</button>`);
+    b.push(`<button class="xbtn xa" onclick="sessionProbe('${sid}')">🔍 Canal</button>`);
+    return b.join('');
+  }
+
+  function toggleEmpty() {
+    const grid=$h('sessions-grid'), empty=$h('sessions-empty');
+    if(!grid||!empty) return;
+    empty.style.display = grid.querySelectorAll('.session-card').length>0 ? 'none' : '';
+  }
+
+  function appendCardLog(sid, msg, level) {
+    const logEl=$h('sclog-'+sid); if(!logEl) return;
+    const cls={ok:'ok',success:'success',warn:'warn',error:'error'}[level]||'';
+    const div=document.createElement('div');
+    div.className='sc-log-line '+cls; div.textContent=`[${fmtT()}] ${msg}`;
+    logEl.appendChild(div); logEl.scrollTop=logEl.scrollHeight;
+    while(logEl.children.length>50) logEl.removeChild(logEl.firstChild);
+  }
+
+  window.sessionStart = async function(sid) {
+    const r=await fetch(`/ivr/sessions/${sid}/start`,{method:'POST'}), d=await r.json();
+    if(!d.ok){appendCardLog(sid,'❌ '+(d.errors?.[0]||d.error||'Error'),'error');return;}
+    appendCardLog(sid,'🚀 Campaña iniciada','success'); refreshSession(sid);
+  };
+  window.sessionStop   = async sid=>{await fetch(`/ivr/sessions/${sid}/stop`,  {method:'POST'});appendCardLog(sid,'⏹ Detenida','warn');   refreshSession(sid);};
+  window.sessionPause  = async sid=>{await fetch(`/ivr/sessions/${sid}/pause`, {method:'POST'});appendCardLog(sid,'⏸ Pausada','warn');    refreshSession(sid);};
+  window.sessionResume = async sid=>{await fetch(`/ivr/sessions/${sid}/resume`,{method:'POST'});appendCardLog(sid,'▶ Reanudada','ok');    refreshSession(sid);};
+  window.sessionDelete = async function(sid) {
+    if(!confirm('¿Eliminar esta sesión?')) return;
+    const r=await fetch(`/ivr/sessions/${sid}`,{method:'DELETE'}), d=await r.json();
+    if(d.ok){$h('scard-'+sid)?.remove(); delete _sessions[sid]; toggleEmpty();}
+  };
+  window.sessionProbe = async function(sid) {
+    const s=_sessions[sid]; if(!s?.device_id){alert('Sin device_id');return;}
+    appendCardLog(sid,'🔍 Iniciando auto-detección…','ok');
+    await fetch('/ivr/probe/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({device_id:s.device_id,session_id:sid})});
+  };
+
+  async function refreshSession(sid) {
+    try{const r=await fetch(`/ivr/sessions/${sid}`),d=await r.json();if(d.ok){_sessions[sid]=d.session;renderSessionCard(d.session);}}catch{}
+  }
+
+  if(window.socket){
+    socket.on('session_status',d=>{if(_sessions[d.session_id]){_sessions[d.session_id].status=d.status;renderSessionCard(_sessions[d.session_id]);}});
+    socket.on('session_log',d=>{if(d.session_id)appendCardLog(d.session_id,d.msg,d.level);});
+    socket.on('ivr_call_update',d=>{
+      if(!d.session_id||!_sessions[d.session_id])return;
+      const s=_sessions[d.session_id];
+      if(d.processed!=null)s.processed=d.processed; if(d.total!=null)s.total=d.total; if(d.number!=null)s.last_number=d.number;
+      renderSessionCard(s);
+    });
+    socket.on('probe_status',d=>{
+      if(d.session_id)appendCardLog(d.session_id,d.msg,'ok');
+      const ns=$h('ns-probe-status'); if(ns&&d.device_id===_probeDeviceId)ns.textContent=d.msg;
+    });
+    socket.on('probe_result',d=>{
+      _probing=false; _probeDeviceId=null;
+      const btn=$h('ns-probe-btn'), stat=$h('ns-probe-status');
+      if(btn){btn.classList.remove('probing');btn.disabled=false;}
+      if(d.ok){
+        if(stat)stat.textContent=`✅ Entrada=${d.in_idx} Salida=${d.out_idx??'—'}`;
+        if(d.in_idx!=null&&$h('ns-audio-in'))$h('ns-audio-in').value=String(d.in_idx);
+        if(d.out_idx!=null&&$h('ns-audio-out'))$h('ns-audio-out').value=String(d.out_idx);
+      } else { if(stat)stat.textContent=d.msg||'❌ No detectado'; }
+      if(d.session_id&&_sessions[d.session_id]){appendCardLog(d.session_id,d.msg,d.ok?'success':'error');refreshSession(d.session_id);}
+    });
+  }
+
+  window.openNewSessionModal = async function() {
+    if($h('ns-probe-status'))$h('ns-probe-status').textContent='';
+    if($h('ns-label'))$h('ns-label').value='';
+    window._nsTemplateData=null;
+    await _refreshDevFor('ns-device'); await _refreshAudFor('ns-audio-in','input');
+    await _refreshAudFor('ns-audio-out','output'); await _refreshTmplFor('ns-template');
+    $h('new-session-modal').removeAttribute('hidden');
+  };
+  window.closeNewSessionModal = function(){$h('new-session-modal').setAttribute('hidden','');_probing=false;};
+
+  window.startProbeForNewSession = async function() {
+    const deviceId=$h('ns-device')?.value;
+    if(!deviceId){alert('Selecciona un dispositivo ADB primero');return;}
+    if(_probing)return;
+    _probing=true; _probeDeviceId=deviceId;
+    const btn=$h('ns-probe-btn'), stat=$h('ns-probe-status');
+    if(btn){btn.classList.add('probing');btn.disabled=true;}
+    if(stat)stat.textContent='🔍 Enviando tono al dispositivo…';
+    try{await fetch('/ivr/probe/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({device_id:deviceId})});}
+    catch(e){_probing=false;if(btn){btn.classList.remove('probing');btn.disabled=false;}if(stat)stat.textContent='❌ '+e.message;}
+  };
+
+  window.applyTemplateToSession = async function() {
+    const slug=$h('ns-template')?.value; if(!slug){alert('Selecciona una plantilla');return;}
+    try{
+      const r=await fetch('/ivr/templates/'+slug), d=await r.json();
+      if(!d.ok){alert(d.error||'Error');return;}
+      if($h('ns-label')&&!$h('ns-label').value)$h('ns-label').value=d.name||slug;
+      window._nsTemplateData=d;
+      if($h('ns-probe-status'))$h('ns-probe-status').textContent=`✅ Plantilla "${d.name}" aplicada`;
+    }catch(e){alert('Error: '+e.message);}
+  };
+
+  window.createSession = async function() {
+    const deviceId=$h('ns-device')?.value, audioIn=$h('ns-audio-in')?.value,
+          audioOut=$h('ns-audio-out')?.value, label=($h('ns-label')?.value||'').trim(), td=window._nsTemplateData||{};
+    if(!deviceId){alert('Selecciona un dispositivo ADB');return;}
+    const payload={device_id:deviceId, audio_in_idx:audioIn?parseInt(audioIn):null, audio_out_idx:audioOut?parseInt(audioOut):null,
+      label:label||('Sesión '+deviceId), numbers:td.numbers||[], delay_seconds:td.delay_seconds||5,
+      audio_welcome:td.audio_welcome||null, audio_menu:td.audio_menu||null, audio_bye:td.audio_bye||null,
+      audio_no_tone:td.audio_no_tone||null, ivr_options:td.ivr_options||{}, tone_timeout:td.tone_timeout||10,
+      menu_repeats:td.menu_repeats||2, record_calls:td.record_calls||false};
+    const btn=$h('ns-create-btn'); if(btn){btn.disabled=true;btn.textContent='Creando…';}
+    try{
+      const r=await fetch('/ivr/sessions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}), d=await r.json();
+      if(!d.ok){alert('Error: '+(d.errors?.join('\n')||d.error||'?'));return;}
+      _sessions[d.session_id]=d.session; renderSessionCard(d.session); toggleEmpty(); closeNewSessionModal(); window._nsTemplateData=null;
+    }catch(e){alert('Error de red: '+e.message);}
+    finally{if(btn){btn.disabled=false;btn.textContent='Crear Sesión';}}
+  };
+
+  async function _refreshDevFor(selId){
+    const sel=$h(selId); if(!sel)return;
+    try{const r=await fetch('/adb/devices'),d=await r.json(),prev=sel.value;
+      sel.innerHTML='<option value="">— Seleccionar —</option>';
+      (d.devices||[]).forEach(dev=>{const o=document.createElement('option');o.value=dev.id;o.textContent=`${dev.id}  (${dev.model||dev.status})`;sel.appendChild(o);});
+      if(prev)sel.value=prev;}catch{}
+  }
+  window.refreshDevicesFor=_refreshDevFor;
+
+  async function _refreshAudFor(selId,kind){
+    const sel=$h(selId); if(!sel)return;
+    try{const r=await fetch('/audio/devices'),d=await r.json(),prev=sel.value;
+      sel.innerHTML=`<option value="">${kind==='input'?'— Entrada —':'— Salida —'}</option>`;
+      (d.devices||[]).filter(dev=>kind==='input'?dev.max_input_channels>0:dev.max_output_channels>0)
+        .forEach(dev=>{const o=document.createElement('option');o.value=dev.index;o.textContent=`[${dev.index}] ${dev.name}`;sel.appendChild(o);});
+      if(prev)sel.value=prev;}catch{}
+  }
+
+  async function _refreshTmplFor(selId){
+    const sel=$h(selId); if(!sel)return;
+    try{const r=await fetch('/ivr/templates'),d=await r.json(),prev=sel.value;
+      sel.innerHTML='<option value="">— Sin plantilla —</option>';
+      (d.templates||[]).forEach(t=>{const o=document.createElement('option');o.value=t.slug;o.textContent=t.name;sel.appendChild(o);});
+      if(prev)sel.value=prev;}catch{}
+  }
+
+  setInterval(()=>{
+    if($h('tc-sessions')?.classList.contains('active'))
+      Object.keys(_sessions).forEach(sid=>{if(_sessions[sid]?.status==='RUNNING')refreshSession(sid);});
+  },10000);
+
+})();

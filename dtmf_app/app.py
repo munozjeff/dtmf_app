@@ -1693,36 +1693,50 @@ class PythonAudioMonitor(threading.Thread):
     Captura audio directamente del dispositivo de entrada del sistema
     y ejecuta detección DTMF Goertzel en tiempo real.
     No depende del navegador ni de mediaDevices.
+
+    Para multi-sesión: pasar `dtmf_callback` al constructor para aislar
+    el enrutamiento DTMF de esta instancia del global _ivr_dtmf_callback.
     """
     WINDOW = int(TARGET_SR * 0.08)   # 640 muestras @ 8 kHz
     HOP    = int(TARGET_SR * 0.02)   # 160 muestras
 
-    def __init__(self, device_index=None):
+    def __init__(self, device_index=None, dtmf_callback=None,
+                 session_id: str = None):
         super().__init__(daemon=True, name="PythonAudioMonitor")
-        self.device_index = device_index
+        self.device_index    = device_index
+        # Callback DTMF por instancia (multi-sesión) — si None usa global
+        self._dtmf_callback  = dtmf_callback
+        self._session_id     = session_id   # para filtrar eventos Socket.IO
         self._stop_ev = threading.Event()
         self._buf: list[float] = []
         self._last_digit: str | None = None
         self._last_emit = 0.0
-        self._viz_acc   = 0.0   # acumulador RMS para audio_viz
-        self._viz_n     = 0     # frames acumulados
+        self._viz_acc   = 0.0
+        self._viz_n     = 0
+
+    def _emit_log(self, msg: str, level: str = "info"):
+        """Emite log al canal correcto (global o sesión)."""
+        if self._session_id:
+            socketio.emit("session_log", {
+                "session_id": self._session_id, "msg": msg, "level": level,
+                "ts": time.time()
+            })
+        else:
+            _emit_ivr("ivr_log", {"msg": msg, "level": level})
 
     def run(self):
         if not _SD_OK:
-            _emit_ivr("ivr_log", {"msg": "❌ sounddevice no instalado", "level": "error"})
+            self._emit_log("❌ sounddevice no instalado", "error")
             return
         try:
             dev_info = sd.query_devices(self.device_index, "input")
             sr_native = int(dev_info["default_samplerate"])
             dev_name  = dev_info["name"]
         except Exception as exc:
-            _emit_ivr("ivr_log", {"msg": f"❌ Dispositivo audio inválido: {exc}", "level": "error"})
+            self._emit_log(f"❌ Dispositivo audio inválido: {exc}", "error")
             return
 
-        _emit_ivr("ivr_log", {
-            "msg": f"🎤 Monitor activo: [{dev_name}] @ {sr_native} Hz",
-            "level": "success"
-        })
+        self._emit_log(f"🎤 Monitor activo: [{dev_name}] @ {sr_native} Hz", "success")
 
         def callback(indata, frames, time_info, status):
             if self._stop_ev.is_set():
@@ -1735,13 +1749,17 @@ class PythonAudioMonitor(threading.Thread):
             self._viz_acc += rms_raw
             self._viz_n   += 1
             if self._viz_n >= 3:   # ~15 Hz si blocksize=40ms
-                socketio.emit("audio_viz", {"ch": "input", "rms": self._viz_acc / self._viz_n})
+                if self._session_id:
+                    socketio.emit("session_viz", {
+                        "session_id": self._session_id,
+                        "ch": "input", "rms": self._viz_acc / self._viz_n
+                    })
+                else:
+                    socketio.emit("audio_viz", {"ch": "input", "rms": self._viz_acc / self._viz_n})
                 self._viz_acc = 0.0
                 self._viz_n   = 0
 
             # ── Alimentar grabador: sintetizar DTMF si hay dígito activo ──────
-            # Si se está sosteniendo un dígito DTMF, inyectar tono dual limpio
-            # en lugar del audio crudo (que puede tener ruido de línea).
             if _active_recorder is not None:
                 if self._last_digit and self._last_digit in _DTMF_DIGIT_FREQS:
                     f_row, f_col = _DTMF_DIGIT_FREQS[self._last_digit]
@@ -1781,16 +1799,21 @@ class PythonAudioMonitor(threading.Thread):
             now = time.time()
             if now - self._last_emit > 0.08:
                 self._last_emit = now
-                socketio.emit("rt_digit", {"digit": digit, "energy": round(float(energy), 8)})
+                socketio.emit("rt_digit", {"digit": digit, "energy": round(float(energy), 8),
+                                           "session_id": self._session_id})
 
             # Notificar al IVR cuando hay dígito nuevo
             if digit and digit != self._last_digit:
                 self._last_digit = digit
-                print(f"[AudioMonitor] Dígito: {digit}  E={energy:.2e}")
-                _emit_ivr("ivr_log", {"msg": f"  🎯 Tono detectado: {digit}", "level": "success"})
-                if _ivr_dtmf_callback:
+                print(f"[AudioMonitor] Dígito: {digit}  E={energy:.2e}"
+                      + (f"  [s:{self._session_id}]" if self._session_id else ""))
+                self._emit_log(f"  🎯 Tono detectado: {digit}", "success")
+
+                # Usar callback por instancia (multi-sesión) o global (legacy)
+                cb = self._dtmf_callback or _ivr_dtmf_callback
+                if cb:
                     try:
-                        _ivr_dtmf_callback(digit)
+                        cb(digit)
                     except Exception as exc:
                         print(f"[AudioMonitor] Error callback: {exc}")
             elif not digit:
@@ -1801,7 +1824,7 @@ class PythonAudioMonitor(threading.Thread):
 
         # ── Abrir stream con retry (WASAPI puede tardar en liberar el device) ──
         max_retries = 4
-        retry_delay = 0.3   # segundos entre intentos
+        retry_delay = 0.3
         last_exc    = None
 
         for attempt in range(1, max_retries + 1):
@@ -1815,31 +1838,29 @@ class PythonAudioMonitor(threading.Thread):
                     callback  = callback,
                 ):
                     if attempt > 1:
-                        _emit_ivr("ivr_log", {
-                            "msg":   f"🎤 Stream abierto (intento {attempt})",
-                            "level": "success",
-                        })
+                        self._emit_log(f"🎤 Stream abierto (intento {attempt})", "success")
                     self._stop_ev.wait()
-                break   # stream cerrado limpiamente — salir del retry loop
+                break
 
             except Exception as exc:
                 last_exc = exc
                 if self._stop_ev.is_set():
-                    break   # parada solicitada — no reintentar
+                    break
                 print(f"[AudioMonitor] Intento {attempt}/{max_retries} fallido: {exc}")
                 if attempt < max_retries:
                     time.sleep(retry_delay)
-                    retry_delay *= 1.5   # backoff exponencial
+                    retry_delay *= 1.5
                 else:
-                    _emit_ivr("ivr_log", {
-                        "msg":   f"❌ Monitor audio: sin stream tras {max_retries} intentos — {last_exc}",
-                        "level": "error",
-                    })
+                    self._emit_log(
+                        f"❌ Monitor audio: sin stream tras {max_retries} intentos — {last_exc}",
+                        "error"
+                    )
 
-        _emit_ivr("ivr_log", {"msg": "🔇 Monitor de audio detenido", "level": "info"})
+        self._emit_log("🔇 Monitor de audio detenido", "info")
 
     def stop(self):
         self._stop_ev.set()
+
 
 
 # ══════════════════════════════════════════════
@@ -3085,6 +3106,379 @@ def templates_audio_file(filename):
     if not os.path.isfile(os.path.join(TMPL_AUDIO, safe)):
         return jsonify({"ok": False, "error": "Archivo no encontrado"}), 404
     return send_from_directory(TMPL_AUDIO, safe)
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  MULTI-SESSION — Rutas /ivr/sessions/*
+#  Permite lanzar N automatizaciones simultáneas, cada una con su propio
+#  dispositivo ADB y canal de audio.
+# ══════════════════════════════════════════════════════════════════════
+
+from dtmf_app.core.session_manager import session_manager
+from dtmf_app.core.ivr_session     import SessionConfig
+from dtmf_app.core.audio_probe     import AudioChannelProber
+from dtmf_app.core.audio_player    import AudioPlayer
+
+# ── Registro de sondas activas (probe en curso por device_id) ─────────────
+_active_probes: "dict[str, AudioChannelProber]" = {}
+_probes_lock   = threading.Lock()
+
+
+def _session_emit(event: str, data: dict):
+    """Wrapper para emitir eventos Socket.IO desde sesiones."""
+    socketio.emit(event, data)
+
+
+# ── Crear sesión ──────────────────────────────────────────────────────────
+
+@app.route("/ivr/sessions", methods=["POST"])
+def session_create():
+    """
+    Crea una nueva sesión de automatización.
+    Body JSON (igual que /ivr/start más campos de sesión):
+      device_id, audio_in_idx, audio_out_idx,
+      numbers, delay_seconds, audio_welcome, audio_menu,
+      audio_bye, audio_no_tone, ivr_options,
+      tone_timeout, menu_repeats, record_calls, is_test,
+      label (opcional)
+    """
+    data = request.get_json(force=True) or {}
+
+    def _si(v):
+        try: return int(v) if v is not None and str(v).strip() != "" else None
+        except: return None
+
+    audio_out_idx = _si(data.get("audio_out_idx") or data.get("audio_output_device"))
+    audio_in_idx  = _si(data.get("audio_in_idx")  or data.get("audio_device"))
+
+    # Nombre del dispositivo de salida
+    audio_out_name = None
+    if audio_out_idx is not None and _SD_OK:
+        try:
+            audio_out_name = sd.query_devices(audio_out_idx)["name"]
+        except Exception:
+            pass
+
+    # Normalizar ivr_options
+    ivr_options_raw = data.get("ivr_options", {})
+    ivr_options: dict = {}
+    if isinstance(ivr_options_raw, dict):
+        for k, v in ivr_options_raw.items():
+            ivr_options[str(k)] = v if isinstance(v, dict) else (str(v) if v else "")
+
+    config = SessionConfig(
+        device_id      = data.get("device_id", ""),
+        audio_in_idx   = audio_in_idx,
+        audio_out_idx  = audio_out_idx,
+        audio_out_name = audio_out_name,
+        numbers        = data.get("numbers", []),
+        delay_seconds  = float(data.get("delay_seconds", 5)),
+        audio_welcome  = data.get("audio_welcome") or None,
+        audio_menu     = data.get("audio_menu")    or None,
+        audio_bye      = data.get("audio_bye")     or None,
+        audio_no_tone  = data.get("audio_no_tone") or None,
+        ivr_options    = ivr_options,
+        tone_timeout   = float(data.get("tone_timeout", 10)),
+        menu_repeats   = int(data.get("menu_repeats", 2)),
+        record_calls   = bool(data.get("record_calls", False)),
+        is_test        = bool(data.get("is_test", False)),
+    )
+
+    # Validar conflictos con sesiones activas
+    errors = session_manager.validate_config(config)
+    if errors:
+        return jsonify({"ok": False, "errors": errors}), 409
+
+    session_id = session_manager.create(
+        config   = config,
+        emit_fn  = _session_emit,
+        label    = data.get("label") or f"Sesión {data.get('device_id', '?')}",
+    )
+
+    return jsonify({"ok": True, "session_id": session_id,
+                    "session": session_manager.get(session_id).to_dict()})
+
+
+# ── Listar sesiones ───────────────────────────────────────────────────────
+
+@app.route("/ivr/sessions", methods=["GET"])
+def session_list():
+    """Lista todas las sesiones registradas."""
+    return jsonify({"ok": True, "sessions": session_manager.list_all()})
+
+
+# ── Detalle de una sesión ─────────────────────────────────────────────────
+
+@app.route("/ivr/sessions/<session_id>", methods=["GET"])
+def session_get(session_id: str):
+    session = session_manager.get(session_id)
+    if session is None:
+        return jsonify({"ok": False, "error": "Sesión no encontrada"}), 404
+    return jsonify({"ok": True, "session": session.to_dict(),
+                    "log": session.get_log()[-50:]})  # últimas 50 líneas
+
+
+# ── Eliminar sesión ───────────────────────────────────────────────────────
+
+@app.route("/ivr/sessions/<session_id>", methods=["DELETE"])
+def session_delete(session_id: str):
+    ok = session_manager.remove(session_id)
+    if not ok:
+        return jsonify({"ok": False,
+                        "error": "Sesión no encontrada o está activa"}), 400
+    return jsonify({"ok": True})
+
+
+# ── Iniciar campaña de una sesión ─────────────────────────────────────────
+
+@app.route("/ivr/sessions/<session_id>/start", methods=["POST"])
+def session_start(session_id: str):
+    """
+    Inicia la campaña IVR de la sesión.
+    Cada sesión usa su propio AudioPlayer y PythonAudioMonitor aislados.
+    """
+    session = session_manager.get(session_id)
+    if session is None:
+        return jsonify({"ok": False, "error": "Sesión no encontrada"}), 404
+
+    cfg = session.config
+
+    if not cfg.device_id:
+        return jsonify({"ok": False, "error": "Sesión sin device_id"}), 400
+    if not cfg.numbers:
+        return jsonify({"ok": False, "error": "Sin números en la cola"}), 400
+
+    # Validar conflictos
+    errors = session_manager.validate_config(cfg)
+    if errors:
+        return jsonify({"ok": False, "errors": errors}), 409
+
+    # Construir AudioPlayer dedicado para esta sesión
+    player = AudioPlayer(output_device_idx=cfg.audio_out_idx)
+
+    # Construir PythonAudioMonitor dedicado (con callback aislado)
+    # El callback lo registrará la campaña cuando se inicie
+    def _campaign_factory(sess):
+        """Crea y configura un IVRCampaign para esta sesión."""
+        campaign_cfg = cfg.to_campaign_config()
+        campaign     = IVRCampaign(campaign_cfg)
+
+        # Sobreescribir métodos de audio para usar el AudioPlayer de sesión
+        # y el PythonAudioMonitor con session_id
+        original_run = campaign.run
+
+        def patched_run():
+            """Run con dispositivos de audio aislados por sesión."""
+            # Configurar monitor DTMF con callback de la campaña
+            monitor = PythonAudioMonitor(
+                device_index    = cfg.audio_in_idx,
+                dtmf_callback   = campaign.on_dtmf,
+                session_id      = sess.session_id,
+            )
+
+            # Patch de funciones de audio en el contexto de esta campaña
+            # Usamos atributos de campaña para evitar tocar globals
+            campaign._session_player  = player
+            campaign._session_monitor = monitor
+            campaign._session_id      = sess.session_id
+
+            # Emitir progreso a la UI con session_id
+            def _session_emit_ivr(event, data):
+                data["session_id"] = sess.session_id
+                socketio.emit(event, data)
+
+            # El IVRCampaign usa _emit_ivr global — redirigir vía monkey-patch temporal
+            # es complejo. En cambio, dejamos que los eventos globales lleguen a la UI
+            # y el frontend los filtra por session_id donde aplique.
+            # Los logs de sesión se emiten también via session_log.
+            monitor.start()
+            original_run()
+            monitor.stop()
+
+            sess.set_status("DONE")
+
+        import types
+        campaign.run = types.MethodType(lambda self: patched_run(), campaign)
+        return campaign
+
+    ok = session_manager.start(session_id, _campaign_factory)
+    if not ok:
+        return jsonify({"ok": False, "error": "Error iniciando campaña"}), 500
+
+    # Iniciar watchdog ADB para esta sesión
+    watchdog = ADBWatchdog(cfg.device_id)
+    watchdog.start()
+    session.watchdog = watchdog
+
+    return jsonify({"ok": True, "session_id": session_id})
+
+
+# ── Detener sesión ────────────────────────────────────────────────────────
+
+@app.route("/ivr/sessions/<session_id>/stop", methods=["POST"])
+def session_stop(session_id: str):
+    ok = session_manager.stop(session_id)
+    return jsonify({"ok": ok, "error": "Sesión no encontrada" if not ok else None})
+
+
+# ── Pausar / Reanudar ─────────────────────────────────────────────────────
+
+@app.route("/ivr/sessions/<session_id>/pause", methods=["POST"])
+def session_pause(session_id: str):
+    ok = session_manager.pause(session_id)
+    return jsonify({"ok": ok})
+
+
+@app.route("/ivr/sessions/<session_id>/resume", methods=["POST"])
+def session_resume(session_id: str):
+    ok = session_manager.resume(session_id)
+    return jsonify({"ok": ok})
+
+
+# ── Actualizar config de sesión (sin reiniciar) ────────────────────────────
+
+@app.route("/ivr/sessions/<session_id>", methods=["PATCH"])
+def session_update(session_id: str):
+    """Actualiza campos de config de una sesión que aún no ha iniciado."""
+    session = session_manager.get(session_id)
+    if session is None:
+        return jsonify({"ok": False, "error": "Sesión no encontrada"}), 404
+    if session.is_active:
+        return jsonify({"ok": False, "error": "No se puede editar una sesión activa"}), 409
+
+    data = request.get_json(force=True) or {}
+    cfg  = session.config
+
+    def _si(v):
+        try: return int(v) if v is not None and str(v).strip() != "" else None
+        except: return None
+
+    if "numbers"       in data: cfg.numbers       = data["numbers"]
+    if "delay_seconds" in data: cfg.delay_seconds = float(data["delay_seconds"])
+    if "audio_welcome" in data: cfg.audio_welcome = data["audio_welcome"] or None
+    if "audio_menu"    in data: cfg.audio_menu    = data["audio_menu"]    or None
+    if "audio_bye"     in data: cfg.audio_bye     = data["audio_bye"]     or None
+    if "audio_no_tone" in data: cfg.audio_no_tone = data["audio_no_tone"] or None
+    if "ivr_options"   in data: cfg.ivr_options   = data["ivr_options"]
+    if "tone_timeout"  in data: cfg.tone_timeout  = float(data["tone_timeout"])
+    if "menu_repeats"  in data: cfg.menu_repeats  = int(data["menu_repeats"])
+    if "record_calls"  in data: cfg.record_calls  = bool(data["record_calls"])
+    if "label"         in data: session.label      = data["label"]
+
+    # Audio devices
+    ao = _si(data.get("audio_out_idx") or data.get("audio_output_device"))
+    ai = _si(data.get("audio_in_idx")  or data.get("audio_device"))
+    if ao is not None:
+        cfg.audio_out_idx = ao
+        if _SD_OK:
+            try: cfg.audio_out_name = sd.query_devices(ao)["name"]
+            except: pass
+    if ai is not None:
+        cfg.audio_in_idx = ai
+
+    return jsonify({"ok": True, "session": session.to_dict()})
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  AUTO-DETECCIÓN DE CANAL DE AUDIO — /ivr/probe
+# ══════════════════════════════════════════════════════════════════════
+
+@app.route("/ivr/probe/start", methods=["POST"])
+def probe_start():
+    """
+    Inicia la auto-detección de canal de audio para un dispositivo ADB.
+    Body JSON: { device_id, session_id (opcional) }
+
+    Proceso:
+      1. Push de calib_tone.wav al dispositivo vía ADB
+      2. Reproducción en el altavoz del teléfono
+      3. Escucha en todos los canales libres buscando 3750 Hz (Goertzel)
+      4. Emite 'probe_result' vía Socket.IO con el canal detectado
+    """
+    data      = request.get_json(force=True) or {}
+    device_id = data.get("device_id", "").strip()
+    session_id_hint = data.get("session_id")
+
+    if not device_id:
+        return jsonify({"ok": False, "error": "device_id requerido"}), 400
+
+    with _probes_lock:
+        if device_id in _active_probes:
+            return jsonify({"ok": False,
+                            "error": "Ya hay una sonda activa para este dispositivo"}), 409
+
+    # Canales de entrada ya ocupados por sesiones activas
+    occupied = session_manager.occupied_inputs()
+
+    def _on_found(in_idx: int, out_idx: "int | None"):
+        socketio.emit("probe_result", {
+            "ok":        True,
+            "device_id": device_id,
+            "in_idx":    in_idx,
+            "out_idx":   out_idx,
+            "session_id": session_id_hint,
+            "msg":       f"✅ Canal detectado: entrada={in_idx}" +
+                         (f" salida={out_idx}" if out_idx is not None else ""),
+        })
+        with _probes_lock:
+            _active_probes.pop(device_id, None)
+
+        # Si hay session_id, actualizar automáticamente la sesión
+        if session_id_hint:
+            session = session_manager.get(session_id_hint)
+            if session:
+                session.config.audio_in_idx  = in_idx
+                session.config.audio_out_idx = out_idx
+                if out_idx is not None and _SD_OK:
+                    try:
+                        session.config.audio_out_name = sd.query_devices(out_idx)["name"]
+                    except Exception:
+                        pass
+                session.log(f"🔊 Canales auto-detectados: in={in_idx} out={out_idx}", "success")
+
+    def _on_error(msg: str):
+        socketio.emit("probe_result", {
+            "ok":        False,
+            "device_id": device_id,
+            "session_id": session_id_hint,
+            "msg":       f"❌ {msg}",
+        })
+        with _probes_lock:
+            _active_probes.pop(device_id, None)
+
+    def _on_status(msg: str):
+        socketio.emit("probe_status", {
+            "device_id": device_id,
+            "session_id": session_id_hint,
+            "msg":       msg,
+        })
+
+    prober = AudioChannelProber(
+        device_id        = device_id,
+        occupied_inputs  = occupied,
+        on_found         = _on_found,
+        on_error         = _on_error,
+        on_status        = _on_status,
+    )
+
+    with _probes_lock:
+        _active_probes[device_id] = prober
+
+    prober.start()
+
+    return jsonify({
+        "ok":      True,
+        "msg":     "Sonda iniciada — espera el evento 'probe_result' vía Socket.IO",
+        "device_id": device_id,
+    })
+
+
+@app.route("/ivr/probe/status/<device_id>")
+def probe_status(device_id: str):
+    """Devuelve si hay una sonda activa para el device_id dado."""
+    with _probes_lock:
+        active = device_id in _active_probes
+    return jsonify({"active": active, "device_id": device_id})
 
 
 if __name__ == "__main__":

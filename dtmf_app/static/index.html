@@ -388,10 +388,112 @@
     .dot.wa-open  { background: #fbbf24; }
     .dot.wa-err   { background: #f87171; }
 
+
     /* Input bridge trigger digit */
     .bridge-trigger-row { display: flex; gap: 5px; align-items: center; }
+
+    /* ── Multi tab button ───────────────────────────── */
+    .main-tab.multi { border-top: 2px solid transparent; }
+    .main-tab.multi.active { border-top-color: #a78bfa; color: #a78bfa; }
+
+    /* ── Sessions tab ──────────────────────────────── */
+    #tc-sessions {
+      display: flex; flex-direction: column; gap: 0; overflow: hidden; height: 100%;
+    }
+    .sessions-toolbar {
+      display: flex; align-items: center; gap: 8px; padding: 8px 14px;
+      border-bottom: 1px solid rgba(255,255,255,0.06); flex-shrink: 0;
+    }
+    .sessions-toolbar span { flex: 1; }
+    .sessions-grid {
+      flex: 1; overflow-y: auto; padding: 12px 14px;
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+      gap: 12px; align-content: start;
+    }
+    .sessions-empty {
+      grid-column: 1/-1; text-align: center; color: #475569;
+      padding: 48px 0; font-size: 13px;
+    }
+
+    /* ── Session Card ──────────────────────────────── */
+    .session-card {
+      background: rgba(30,41,59,0.8);
+      border: 1px solid rgba(255,255,255,0.07);
+      border-radius: 12px; padding: 12px 14px;
+      display: flex; flex-direction: column; gap: 8px;
+      transition: border-color .2s;
+    }
+    .session-card:hover { border-color: rgba(129,140,248,0.3); }
+    .session-card.running { border-color: rgba(74,222,128,0.35); }
+    .session-card.paused  { border-color: rgba(251,191,36,0.35); }
+    .session-card.error   { border-color: rgba(248,113,113,0.35); }
+
+    .sc-head {
+      display: flex; align-items: center; gap: 8px;
+    }
+    .sc-dot {
+      width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0;
+      background: #374151; transition: background .3s;
+    }
+    .sc-dot.idle    { background: #374151; }
+    .sc-dot.running { background: #4ade80; box-shadow: 0 0 6px #4ade80; animation: pulse-g 1.5s infinite; }
+    .sc-dot.paused  { background: #fbbf24; }
+    .sc-dot.done    { background: #64748b; }
+    .sc-dot.error   { background: #f87171; box-shadow: 0 0 6px #f87171; }
+    @keyframes pulse-g { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+    .sc-label {
+      font-weight: 600; font-size: 12px; color: #e2e8f0; flex: 1;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .sc-sid { font-size: 10px; color: #475569; font-family: 'JetBrains Mono', monospace; }
+
+    .sc-meta {
+      display: flex; flex-wrap: wrap; gap: 4px;
+    }
+    .sc-tag {
+      font-size: 10px; padding: 2px 7px; border-radius: 4px;
+      background: rgba(99,102,241,0.15); color: #818cf8;
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .sc-tag.adb  { background: rgba(34,211,238,0.12); color: #22d3ee; }
+    .sc-tag.aud  { background: rgba(74,222,128,0.12); color: #4ade80; }
+    .sc-tag.warn { background: rgba(251,191,36,0.15); color: #fbbf24; }
+
+    .sc-progress {
+      height: 3px; background: rgba(255,255,255,0.06); border-radius: 2px; overflow: hidden;
+    }
+    .sc-progress-fill {
+      height: 100%; background: linear-gradient(90deg,#818cf8,#22d3ee);
+      transition: width .4s; border-radius: 2px;
+    }
+    .sc-progress-txt {
+      font-size: 10px; color: #64748b; text-align: right;
+    }
+
+    .sc-log {
+      max-height: 80px; overflow-y: auto; background: rgba(0,0,0,0.25);
+      border-radius: 6px; padding: 5px 8px;
+      font-family: 'JetBrains Mono', monospace; font-size: 10px; color: #94a3b8;
+    }
+    .sc-log-line { white-space: pre-wrap; word-break: break-all; }
+    .sc-log-line.ok      { color: #4ade80; }
+    .sc-log-line.warn    { color: #fbbf24; }
+    .sc-log-line.error   { color: #f87171; }
+    .sc-log-line.success { color: #4ade80; }
+
+    .sc-btns {
+      display: flex; gap: 5px; flex-wrap: wrap;
+    }
+    .sc-btns button { font-size: 10px; padding: 3px 8px; }
+
+    /* Probe button animation */
+    .probing { animation: probing-anim .8s infinite alternate; }
+    @keyframes probing-anim { from { opacity:1 } to { opacity:.4 } }
   </style>
 </head>
+
 <body>
 
 <!-- HEADER -->
@@ -613,10 +715,11 @@
   <!-- ══════════════ PANEL DERECHO — MARCACIÓN ══════════════ -->
   <div class="main-panel">
 
-    <!-- Tabs Automática / Manual -->
+    <!-- Tabs Automática / Manual / Sesiones -->
     <div class="main-tabs">
-      <button class="main-tab active" id="tab-auto"   onclick="switchMainTab('auto')">📋 Campaña Automática</button>
-      <button class="main-tab manual" id="tab-manual" onclick="switchMainTab('manual')">📞 Marcación Manual</button>
+      <button class="main-tab active" id="tab-auto"     onclick="switchMainTab('auto')">📋 Campaña Automática</button>
+      <button class="main-tab manual"  id="tab-manual"  onclick="switchMainTab('manual')">📞 Marcación Manual</button>
+      <button class="main-tab multi"   id="tab-sessions" onclick="switchMainTab('sessions')">🔀 Multi-Sesión</button>
     </div>
 
     <!-- ───────────── TAB: AUTOMÁTICA ───────────── -->
@@ -765,9 +868,85 @@
 
     </div><!-- /tc-manual -->
 
+
+    <!-- ───────────── TAB: MULTI-SESIÓN ───────────── -->
+    <div class="tab-content" id="tc-sessions">
+
+      <!-- Barra de acciones: Nueva sesión -->
+      <div class="sessions-toolbar">
+        <span style="font-size:11px;color:#64748b">Cada sesión tiene su propio dispositivo ADB y canal de audio</span>
+        <button class="xbtn xp" id="btn-new-session" onclick="openNewSessionModal()">＋ Nueva Sesión</button>
+        <button class="xbtn xa" id="btn-refresh-sessions" onclick="loadSessions()" title="Actualizar">🔄</button>
+      </div>
+
+      <!-- Grid de tarjetas de sesión -->
+      <div class="sessions-grid" id="sessions-grid">
+        <div class="sessions-empty" id="sessions-empty">
+          <div style="font-size:32px;margin-bottom:8px">🔀</div>
+          <div>No hay sesiones. Crea una con <strong>＋ Nueva Sesión</strong></div>
+        </div>
+      </div>
+
+    </div><!-- /tc-sessions -->
+
   </div><!-- /main-panel -->
 
 </div><!-- /root -->
+
+<!-- ═══════════════ MODAL NUEVA SESIÓN ═══════════════ -->
+<div class="modal-bg" id="new-session-modal" hidden>
+  <div class="modal-box" style="min-width:420px;max-width:500px">
+    <h3 style="margin:0 0 14px">🔀 Nueva Sesión</h3>
+
+    <div style="display:flex;flex-direction:column;gap:10px">
+
+      <!-- Dispositivo ADB -->
+      <div>
+        <div class="fsub" style="margin-bottom:4px">📱 Dispositivo ADB</div>
+        <div class="frow" style="gap:6px">
+          <select class="fsel" id="ns-device" style="flex:1"><option value="">— Seleccionar —</option></select>
+          <button class="xbtn xa" onclick="refreshDevicesFor('ns-device')" style="padding:5px 8px" title="Refrescar">🔄</button>
+        </div>
+      </div>
+
+      <!-- Canal de audio -->
+      <div>
+        <div class="fsub" style="margin-bottom:4px">🎤 Canal de Audio</div>
+        <div class="frow" style="gap:6px">
+          <select class="fsel" id="ns-audio-in" style="flex:1"><option value="">— Entrada —</option></select>
+          <select class="fsel" id="ns-audio-out" style="flex:1"><option value="">— Salida —</option></select>
+        </div>
+        <div style="margin-top:5px">
+          <button class="xbtn xa" id="ns-probe-btn" onclick="startProbeForNewSession()" style="font-size:11px;width:100%">
+            🔍 Auto-detectar canal (envía tono al teléfono)
+          </button>
+          <div id="ns-probe-status" style="font-size:10px;color:#64748b;margin-top:3px;min-height:14px"></div>
+        </div>
+      </div>
+
+      <!-- Plantilla -->
+      <div>
+        <div class="fsub" style="margin-bottom:4px">📑 Plantilla de configuración</div>
+        <div class="frow" style="gap:6px">
+          <select class="fsel" id="ns-template" style="flex:1"><option value="">— Sin plantilla —</option></select>
+          <button class="xbtn xg" onclick="applyTemplateToSession()" style="padding:5px 8px;font-size:11px" title="Aplicar">✔</button>
+        </div>
+      </div>
+
+      <!-- Etiqueta -->
+      <div>
+        <div class="fsub" style="margin-bottom:4px">🏷 Etiqueta</div>
+        <input class="finp" type="text" id="ns-label" placeholder="Nombre descriptivo (ej: Campaña Norte)" />
+      </div>
+
+    </div>
+
+    <div class="modal-acts" style="margin-top:16px">
+      <button class="xbtn xg" onclick="closeNewSessionModal()">Cancelar</button>
+      <button class="xbtn xp" id="ns-create-btn" onclick="createSession()">Crear Sesión</button>
+    </div>
+  </div>
+</div>
 
 <!-- Modal prueba -->
 <div class="modal-bg" id="ivr-test-modal" hidden>
