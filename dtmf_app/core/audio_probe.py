@@ -59,6 +59,62 @@ def _goertzel_energy(frame: np.ndarray, target_hz: float, sr: int) -> float:
     return (s2**2 + s1**2 - coeff * s1 * s2) / (N * N)
 
 
+def _get_working_inputs(occupied: "set[int]") -> list[int]:
+    """
+    Retorna índices de dispositivos de entrada que:
+      - Tienen al menos 1 canal de entrada
+      - No están ocupados
+      - No usan la API WDM-KS (que no soporta el modo bloqueante en Windows)
+      - Se pueden abrir sin error (prueba rápida)
+    Prioriza dispositivos WASAPI (hostalias que contiene 'WASAPI').
+    """
+    if not _SD_OK:
+        return []
+
+    try:
+        all_devs  = sd.query_devices()
+        all_hosts = sd.query_hostapis()
+    except Exception:
+        return []
+
+    # Construir mapa idx_host → nombre de API
+    host_names = {i: h.get("name", "") for i, h in enumerate(all_hosts)}
+
+    candidates: list[int] = []
+    wasapi_idxs: list[int] = []
+    other_idxs:  list[int] = []
+
+    for idx, dev in enumerate(all_devs):
+        if dev.get("max_input_channels", 0) < 1:
+            continue
+        if idx in occupied:
+            continue
+        api_name = host_names.get(dev.get("hostapi", -1), "")
+        # Excluir WDM-KS: no soporta modo bloqueante en Windows
+        if "WDM" in api_name or "KS" in api_name:
+            print(f"[Probe] Omitiendo canal {idx} ({dev['name']}) — {api_name}")
+            continue
+        if "WASAPI" in api_name:
+            wasapi_idxs.append(idx)
+        else:
+            other_idxs.append(idx)
+
+    # Poner WASAPI primero (son los más estables en Windows)
+    for idx in wasapi_idxs + other_idxs:
+        sr = int(all_devs[idx].get("default_samplerate", 44100))
+        # Prueba rápida: intentar abrir el stream brevemente
+        try:
+            with sd.InputStream(device=idx, channels=1, samplerate=sr,
+                                blocksize=512, dtype="float32"):
+                pass  # se abre y se cierra de inmediato
+            candidates.append(idx)
+        except Exception as e:
+            print(f"[Probe] Omitiendo canal {idx} ({all_devs[idx]['name']}): {e}")
+
+    return candidates
+
+
+
 class ChannelListener(threading.Thread):
     """
     Escucha en un canal de entrada específico buscando el tono de calibración.
@@ -205,21 +261,12 @@ class AudioChannelProber:
             self._done.set()
             return
 
-        # ── 2. Obtener canales de entrada disponibles ─────────────
-        try:
-            all_devs = sd.query_devices()
-        except Exception as exc:
-            self.on_error(f"Error listando dispositivos de audio: {exc}")
-            self._done.set()
-            return
-
-        candidate_inputs: list[int] = []
-        for idx, dev in enumerate(all_devs):
-            if dev.get("max_input_channels", 0) > 0 and idx not in self.occupied_inputs:
-                candidate_inputs.append(idx)
+        # ── 2. Obtener canales de entrada disponibles (filtrados y probados) ───
+        self.on_status("🔍 Verificando dispositivos de audio compatibles…")
+        candidate_inputs = _get_working_inputs(self.occupied_inputs)
 
         if not candidate_inputs:
-            self.on_error("No hay canales de entrada disponibles (todos ocupados)")
+            self.on_error("No hay canales de entrada disponibles (todos ocupados o incompatibles con Windows WASAPI)")
             self._done.set()
             return
 
