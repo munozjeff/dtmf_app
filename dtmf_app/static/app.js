@@ -1164,20 +1164,20 @@ function _onBridgeState(state) {
     try{const r=await fetch(`/ivr/sessions/${sid}`),d=await r.json();if(d.ok){_sessions[sid]=d.session;renderSessionCard(d.session);}}catch{}
   }
 
-  if(window.socket){
-    socket.on('session_status',d=>{if(_sessions[d.session_id]){_sessions[d.session_id].status=d.status;renderSessionCard(_sessions[d.session_id]);}});
-    socket.on('session_log',d=>{if(d.session_id)appendCardLog(d.session_id,d.msg,d.level);});
-    socket.on('ivr_call_update',d=>{
+  if(typeof ivrSocket !== 'undefined'){
+    ivrSocket.on('session_status',d=>{if(_sessions[d.session_id]){_sessions[d.session_id].status=d.status;renderSessionCard(_sessions[d.session_id]);}});
+    ivrSocket.on('session_log',d=>{if(d.session_id)appendCardLog(d.session_id,d.msg,d.level);});
+    ivrSocket.on('ivr_call_update',d=>{
       if(!d.session_id||!_sessions[d.session_id])return;
       const s=_sessions[d.session_id];
       if(d.processed!=null)s.processed=d.processed; if(d.total!=null)s.total=d.total; if(d.number!=null)s.last_number=d.number;
       renderSessionCard(s);
     });
-    socket.on('probe_status',d=>{
+    ivrSocket.on('probe_status',d=>{
       if(d.session_id)appendCardLog(d.session_id,d.msg,'ok');
       const ns=$h('ns-probe-status'); if(ns&&d.device_id===_probeDeviceId)ns.textContent=d.msg;
     });
-    socket.on('probe_result',d=>{
+    ivrSocket.on('probe_result',d=>{
       _probing=false; _probeDeviceId=null;
       const btn=$h('ns-probe-btn'), stat=$h('ns-probe-status');
       if(btn){btn.classList.remove('probing');btn.disabled=false;}
